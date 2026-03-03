@@ -97,7 +97,7 @@ impl OpenCodeConnector {
 
     /// Extract sessions from OpenCode's SQLite database (v1.2+).
     ///
-    /// Schema: session(id, title, directory, project_id, created_at, updated_at),
+    /// Schema: session(id, title, directory, project_id, time_created, time_updated),
     ///         message(id, session_id, data JSON), part(id, message_id, session_id, data JSON)
     fn extract_from_sqlite(
         db_path: &Path,
@@ -116,7 +116,7 @@ impl OpenCodeConnector {
         // We normalize in Rust rather than using strftime() which breaks on integer columns.
         let mut sessions: Vec<SqliteSession> = Vec::new();
         let mut stmt = conn.prepare(
-            "SELECT id, title, directory, project_id, created_at, updated_at FROM session"
+            "SELECT id, title, directory, project_id, time_created, time_updated FROM session"
         ).with_context(|| "failed to prepare session query")?;
 
         let row_fn = |row: &rusqlite::Row<'_>| -> rusqlite::Result<SqliteSession> {
@@ -125,8 +125,8 @@ impl OpenCodeConnector {
                 title: row.get(1)?,
                 directory: row.get(2)?,
                 project_id: row.get(3)?,
-                created_at_raw: row.get::<_, Option<rusqlite::types::Value>>(4)?,
-                updated_at_raw: row.get::<_, Option<rusqlite::types::Value>>(5)?,
+                time_created_raw: row.get::<_, Option<rusqlite::types::Value>>(4)?,
+                time_updated_raw: row.get::<_, Option<rusqlite::types::Value>>(5)?,
             })
         };
 
@@ -159,11 +159,11 @@ impl OpenCodeConnector {
             let msg_ended_at = messages.iter().filter_map(|m| m.created_at).max();
 
             let session_created_ms = session
-                .created_at_raw
+                .time_created_raw
                 .as_ref()
                 .and_then(normalize_sqlite_ts_value);
             let session_updated_ms = session
-                .updated_at_raw
+                .time_updated_raw
                 .as_ref()
                 .and_then(normalize_sqlite_ts_value);
 
@@ -212,23 +212,23 @@ impl OpenCodeConnector {
         conn: &Connection,
         session_id: &str,
     ) -> Result<Vec<NormalizedMessage>> {
-        // Query messages for this session. Read created_at as raw value since
+        // Query messages for this session. Read time_created as raw value since
         // Drizzle ORM may store it as TEXT or INTEGER.
         let mut stmt = conn.prepare(
-            "SELECT id, data, created_at FROM message WHERE session_id = ? ORDER BY created_at ASC"
+            "SELECT id, data, time_created FROM message WHERE session_id = ? ORDER BY time_created ASC"
         )?;
 
         let rows = stmt.query_map([session_id], |row| {
             let id: String = row.get(0)?;
             let data: String = row.get(1)?;
-            let created_at_raw: Option<rusqlite::types::Value> = row.get(2)?;
-            Ok((id, data, created_at_raw))
+            let time_created_raw: Option<rusqlite::types::Value> = row.get(2)?;
+            Ok((id, data, time_created_raw))
         })?;
 
         let mut pending: Vec<(Option<i64>, String, NormalizedMessage)> = Vec::new();
 
         for row in rows.flatten() {
-            let (msg_id, data_json, created_at_raw) = row;
+            let (msg_id, data_json, time_created_raw) = row;
 
             // Parse the JSON data blob
             let msg_data: SqliteMessageData = match serde_json::from_str(&data_json) {
@@ -257,7 +257,7 @@ impl OpenCodeConnector {
 
             let role = msg_data.role.unwrap_or_else(|| "assistant".to_string());
             // Prefer JSON-embedded timestamp, fall back to column timestamp
-            let col_ts = created_at_raw.as_ref().and_then(normalize_sqlite_ts_value);
+            let col_ts = time_created_raw.as_ref().and_then(normalize_sqlite_ts_value);
             let created_at = normalize_opencode_timestamp(
                 msg_data.time.as_ref().and_then(|t| t.created)
             ).or(col_ts);
@@ -302,7 +302,7 @@ impl OpenCodeConnector {
     /// Load parts for a message from SQLite.
     fn load_parts_sqlite(conn: &Connection, message_id: &str) -> Result<Vec<PartInfo>> {
         let mut stmt = conn.prepare(
-            "SELECT data FROM part WHERE message_id = ? ORDER BY created_at ASC"
+            "SELECT data FROM part WHERE message_id = ? ORDER BY time_created ASC"
         )?;
 
         let rows = stmt.query_map([message_id], |row| {
@@ -342,8 +342,8 @@ struct SqliteSession {
     title: Option<String>,
     directory: Option<String>,
     project_id: Option<String>,
-    created_at_raw: Option<rusqlite::types::Value>,
-    updated_at_raw: Option<rusqlite::types::Value>,
+    time_created_raw: Option<rusqlite::types::Value>,
+    time_updated_raw: Option<rusqlite::types::Value>,
 }
 
 /// Deserialized message.data JSON from SQLite.
@@ -2447,23 +2447,23 @@ mod tests {
                 project_id TEXT,
                 title TEXT,
                 directory TEXT,
-                created_at TEXT DEFAULT CURRENT_TIMESTAMP,
-                updated_at TEXT DEFAULT CURRENT_TIMESTAMP
+                time_created TEXT DEFAULT CURRENT_TIMESTAMP,
+                time_updated TEXT DEFAULT CURRENT_TIMESTAMP
             );
             CREATE TABLE message (
                 id TEXT PRIMARY KEY,
                 session_id TEXT NOT NULL,
                 data TEXT NOT NULL,
-                created_at TEXT DEFAULT CURRENT_TIMESTAMP,
-                updated_at TEXT DEFAULT CURRENT_TIMESTAMP
+                time_created TEXT DEFAULT CURRENT_TIMESTAMP,
+                time_updated TEXT DEFAULT CURRENT_TIMESTAMP
             );
             CREATE TABLE part (
                 id TEXT PRIMARY KEY,
                 message_id TEXT NOT NULL,
                 session_id TEXT NOT NULL,
                 data TEXT NOT NULL,
-                created_at TEXT DEFAULT CURRENT_TIMESTAMP,
-                updated_at TEXT DEFAULT CURRENT_TIMESTAMP
+                time_created TEXT DEFAULT CURRENT_TIMESTAMP,
+                time_updated TEXT DEFAULT CURRENT_TIMESTAMP
             );"
         ).unwrap();
 
@@ -2622,34 +2622,34 @@ mod tests {
                 project_id TEXT,
                 title TEXT,
                 directory TEXT,
-                created_at INTEGER,
-                updated_at INTEGER
+                time_created INTEGER,
+                time_updated INTEGER
             );
             CREATE TABLE message (
                 id TEXT PRIMARY KEY,
                 session_id TEXT NOT NULL,
                 data TEXT NOT NULL,
-                created_at INTEGER,
-                updated_at INTEGER
+                time_created INTEGER,
+                time_updated INTEGER
             );
             CREATE TABLE part (
                 id TEXT PRIMARY KEY,
                 message_id TEXT NOT NULL,
                 session_id TEXT NOT NULL,
                 data TEXT NOT NULL,
-                created_at INTEGER,
-                updated_at INTEGER
+                time_created INTEGER,
+                time_updated INTEGER
             );"
         ).unwrap();
 
         // Insert session with epoch second timestamps
         conn.execute(
-            "INSERT INTO session (id, project_id, title, created_at, updated_at) VALUES (?1, ?2, ?3, ?4, ?5)",
+            "INSERT INTO session (id, project_id, title, time_created, time_updated) VALUES (?1, ?2, ?3, ?4, ?5)",
             rusqlite::params!["sess-int", "proj-1", "Integer TS Session", 1700000000_i64, 1700000100_i64],
         ).unwrap();
 
         conn.execute(
-            "INSERT INTO message (id, session_id, data, created_at) VALUES (?1, ?2, ?3, ?4)",
+            "INSERT INTO message (id, session_id, data, time_created) VALUES (?1, ?2, ?3, ?4)",
             rusqlite::params!["msg-int", "sess-int", r#"{"role":"user"}"#, 1700000050_i64],
         ).unwrap();
 
