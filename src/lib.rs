@@ -44,6 +44,7 @@ pub use connectors::{
     Connector, PathTrie, ScanContext, ScanRoot, WorkspaceCache, aider::AiderConnector,
     amp::AmpConnector, claude_code::ClaudeCodeConnector, clawdbot::ClawdbotConnector,
     cline::ClineConnector, codex::CodexConnector, copilot::CopilotConnector,
+    copilot_cli::CopilotCliConnector,
     estimate_tokens_from_content, extract_claude_code_tokens, extract_codex_tokens,
     extract_tokens_for_agent, factory::FactoryConnector, file_modified_since, flatten_content,
     franken_detection_for_connector, gemini::GeminiConnector, get_connector_factories,
@@ -116,6 +117,7 @@ const KNOWN_CONNECTORS: &[&str] = &[
     "cline",
     "codex",
     "continue",
+    "copilot_cli",
     "cursor",
     "factory",
     "gemini",
@@ -138,6 +140,7 @@ fn canonical_connector_slug(slug: &str) -> Option<&'static str> {
         "cline" => Some("cline"),
         "codex" | "codex-cli" => Some("codex"),
         "continue" | "continue-dev" => Some("continue"),
+        "copilot_cli" | "copilot-cli" | "gh-copilot" => Some("copilot_cli"),
         "cursor" => Some("cursor"),
         "factory" | "factory-droid" => Some("factory"),
         "gemini" | "gemini-cli" => Some("gemini"),
@@ -272,6 +275,13 @@ fn default_probe_roots(slug: &str) -> Vec<PathBuf> {
         "continue" => {
             push(&[".continue", "sessions"]);
             push(&[".continue"]);
+        }
+        "copilot_cli" => {
+            push(&[".copilot", "session-state"]);
+            push(&[".copilot", "history-session-state"]);
+            push(&[".config", "gh-copilot"]);
+            push(&[".config", "gh", "copilot"]);
+            push(&[".local", "share", "github-copilot"]);
         }
         "cursor" => {
             push(&[".cursor"]);
@@ -488,6 +498,13 @@ pub fn default_probe_paths_tilde() -> Vec<(&'static str, Vec<String>)> {
                 ],
                 "codex" => vec![tilde(&[".codex", "sessions"])],
                 "continue" => vec![tilde(&[".continue", "sessions"])],
+                "copilot_cli" => vec![
+                    tilde(&[".copilot", "session-state"]),
+                    tilde(&[".copilot", "history-session-state"]),
+                    tilde(&[".config", "gh-copilot"]),
+                    tilde(&[".config", "gh", "copilot"]),
+                    tilde(&[".local", "share", "github-copilot"]),
+                ],
                 "cursor" => vec![tilde(&[".cursor"])],
                 "factory" => vec![tilde(&[".factory", "sessions"])],
                 "gemini" => vec![tilde(&[".gemini", "tmp"]), tilde(&[".gemini"])],

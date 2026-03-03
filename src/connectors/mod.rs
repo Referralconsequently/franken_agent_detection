@@ -11,6 +11,7 @@ pub mod clawdbot;
 pub mod cline;
 pub mod codex;
 pub mod copilot;
+pub mod copilot_cli;
 #[cfg(feature = "cursor")]
 pub mod cursor;
 pub mod factory;
@@ -57,6 +58,7 @@ fn connector_to_franken_slug(connector_slug: &str) -> String {
     match connector_slug.trim().to_ascii_lowercase().as_str() {
         "claude_code" | "claude-code" => "claude".to_string(),
         "copilot" => "github-copilot".to_string(),
+        "copilot_cli" | "copilot-cli" | "gh-copilot" => "copilot_cli".to_string(),
         other => other.to_string(),
     }
 }
@@ -130,6 +132,9 @@ pub fn get_connector_factories() -> Vec<(&'static str, fn() -> Box<dyn Connector
         ("factory", || Box::new(factory::FactoryConnector::new())),
         ("openclaw", || Box::new(openclaw::OpenClawConnector::new())),
         ("copilot", || Box::new(copilot::CopilotConnector::new())),
+        ("copilot_cli", || {
+            Box::new(copilot_cli::CopilotCliConnector::new())
+        }),
     ];
     #[cfg(feature = "opencode")]
     v.push(("opencode", || Box::new(opencode::OpenCodeConnector::new())));
