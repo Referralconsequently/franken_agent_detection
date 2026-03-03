@@ -12,6 +12,18 @@
 //! Additionally, the `gh copilot` CLI may store history at:
 //! - ~/.config/gh-copilot/
 //!
+//! ## Copilot CLI event logs
+//!
+//! GitHub Copilot CLI (the `gh copilot` or standalone `copilot` binary) stores
+//! session history as JSONL event logs:
+//! - ~/.copilot/session-state/{session-id}/events.jsonl  (v2, since 0.0.342)
+//! - ~/.copilot/history-session-state/{session-id}.json  (v1, legacy)
+//! - ~/.copilot/command-history-state.json
+//!
+//! Each line in `events.jsonl` is a JSON object with a `type` field identifying
+//! the event kind. Conversation events use `user.message` and `assistant.message`
+//! types with `content`, `role`, and `timestamp` fields.
+//!
 //! ## VS Code Copilot Chat JSON format
 //!
 //! The primary storage file is `conversations.json` (or individual `.json` files),
@@ -34,6 +46,7 @@
 //! ```
 
 use std::fs;
+use std::io::BufRead;
 use std::path::{Path, PathBuf};
 
 use anyhow::Result;
@@ -85,7 +98,7 @@ impl CopilotConnector {
         ]
     }
 
-    /// gh copilot CLI config path.
+    /// gh copilot CLI config path and Copilot CLI session-state paths.
     fn gh_copilot_paths() -> Vec<PathBuf> {
         let Some(home) = dirs::home_dir() else {
             return Vec::new();
@@ -93,6 +106,10 @@ impl CopilotConnector {
         vec![
             home.join(".config/gh-copilot"),
             home.join(".config/gh/copilot"),
+            // Copilot CLI v2 session storage (since 0.0.342)
+            home.join(".copilot/session-state"),
+            // Copilot CLI v1 legacy session storage
+            home.join(".copilot/history-session-state"),
         ]
     }
 
@@ -123,7 +140,7 @@ impl CopilotConnector {
         paths
     }
 
-    /// Check if a path looks like Copilot Chat storage.
+    /// Check if a path looks like Copilot Chat or Copilot CLI storage.
     fn looks_like_copilot_storage(path: &Path) -> bool {
         let segments: Vec<String> = path
             .components()
@@ -131,7 +148,18 @@ impl CopilotConnector {
             .collect();
 
         if segments.iter().any(|segment| {
-            segment == "github.copilot-chat" || segment == "copilot-chat" || segment == "gh-copilot"
+            segment == "github.copilot-chat"
+                || segment == "copilot-chat"
+                || segment == "gh-copilot"
+        }) {
+            return true;
+        }
+
+        // Copilot CLI session-state directories:
+        // ~/.copilot/session-state/ or ~/.copilot/history-session-state/
+        if segments.windows(2).any(|pair| {
+            pair[0] == ".copilot"
+                && (pair[1] == "session-state" || pair[1] == "history-session-state")
         }) {
             return true;
         }
@@ -142,7 +170,7 @@ impl CopilotConnector {
             .any(|pair| pair[0] == "gh" && pair[1] == "copilot")
     }
 
-    /// Find JSON files that may contain conversation data.
+    /// Find JSON and JSONL files that may contain conversation data.
     fn find_conversation_files(root: &Path) -> Vec<PathBuf> {
         let mut files = Vec::new();
         if !root.exists() {
@@ -154,14 +182,14 @@ impl CopilotConnector {
             if root
                 .extension()
                 .and_then(|e| e.to_str())
-                .is_some_and(|e| e == "json")
+                .is_some_and(|e| e == "json" || e == "jsonl")
             {
                 files.push(root.to_path_buf());
             }
             return files;
         }
 
-        // Walk the directory for JSON files (limited depth to avoid deep traversal).
+        // Walk the directory for JSON/JSONL files (limited depth to avoid deep traversal).
         for entry in WalkDir::new(root)
             .max_depth(4)
             .into_iter()
@@ -169,7 +197,7 @@ impl CopilotConnector {
             .filter(|e| e.file_type().is_file())
         {
             let name = entry.file_name().to_string_lossy();
-            if name.ends_with(".json") {
+            if name.ends_with(".json") || name.ends_with(".jsonl") {
                 files.push(entry.path().to_path_buf());
             }
         }
@@ -413,6 +441,409 @@ impl CopilotConnector {
         })
     }
 
+    /// Check if a file path looks like a Copilot CLI event log (JSONL format).
+    fn is_cli_event_log(path: &Path) -> bool {
+        // Explicit .jsonl extension
+        if path
+            .extension()
+            .and_then(|e| e.to_str())
+            .is_some_and(|e| e == "jsonl")
+        {
+            return true;
+        }
+
+        // Files named events.jsonl inside session-state directories
+        let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+        if name == "events.jsonl" {
+            return true;
+        }
+
+        // JSON files inside session-state or history-session-state directories
+        // are CLI format (one session state JSON per session-id).
+        let path_str = path.to_string_lossy().to_lowercase();
+        if path_str.contains("session-state") || path_str.contains("history-session-state") {
+            return true;
+        }
+
+        false
+    }
+
+    /// Parse a Copilot CLI event log file (JSONL format).
+    ///
+    /// Each line is a JSON object representing an event. We extract events
+    /// with message-like types (`user.message`, `assistant.message`, or
+    /// events containing `role`+`content` fields) and assemble them into
+    /// a single conversation per session file.
+    fn parse_cli_event_log(&self, path: &Path) -> Result<Vec<NormalizedConversation>> {
+        let content = fs::read_to_string(path)?;
+
+        // If it looks like a single JSON document (not JSONL), try the legacy
+        // CLI session-state format: a JSON object with a messages/conversation array.
+        let trimmed = content.trim_start();
+        if trimmed.starts_with('{') || trimmed.starts_with('[') {
+            if let Ok(val) = serde_json::from_str::<Value>(&content) {
+                return self.parse_cli_session_json(&val, path);
+            }
+        }
+
+        // JSONL: each line is a separate JSON event.
+        let reader = std::io::BufReader::new(content.as_bytes());
+        let mut messages = Vec::new();
+        let mut started_at: Option<i64> = None;
+        let mut ended_at: Option<i64> = None;
+        let mut session_id: Option<String> = None;
+        let mut workspace: Option<PathBuf> = None;
+
+        for line in reader.lines() {
+            let line = match line {
+                Ok(l) => l,
+                Err(_) => continue,
+            };
+            let line = line.trim();
+            if line.is_empty() {
+                continue;
+            }
+
+            let event: Value = match serde_json::from_str(line) {
+                Ok(v) => v,
+                Err(_) => continue,
+            };
+
+            // Extract session ID from any event if we haven't found one yet.
+            if session_id.is_none() {
+                session_id = event
+                    .get("session_id")
+                    .or_else(|| event.get("sessionId"))
+                    .and_then(|v| v.as_str())
+                    .map(String::from);
+            }
+
+            // Extract workspace/cwd from session start events.
+            if workspace.is_none() {
+                workspace = event
+                    .get("cwd")
+                    .or_else(|| event.get("workingDirectory"))
+                    .or_else(|| event.get("workspace"))
+                    .and_then(|v| v.as_str())
+                    .map(PathBuf::from);
+            }
+
+            // Extract the event type if present.
+            let event_type = event.get("type").and_then(|v| v.as_str()).unwrap_or("");
+
+            let ts = Self::extract_turn_timestamp(&event);
+
+            // Update time bounds.
+            started_at = match (started_at, ts) {
+                (Some(curr), Some(t)) => Some(curr.min(t)),
+                (None, Some(t)) => Some(t),
+                (other, None) => other,
+            };
+            ended_at = match (ended_at, ts) {
+                (Some(curr), Some(t)) => Some(curr.max(t)),
+                (None, Some(t)) => Some(t),
+                (other, None) => other,
+            };
+
+            // Determine role and extract content from the event.
+            let (role, content) = Self::extract_cli_event_message(&event, event_type);
+            if role.is_empty() || content.trim().is_empty() {
+                continue;
+            }
+
+            messages.push(NormalizedMessage {
+                idx: i64::try_from(messages.len()).unwrap_or(i64::MAX),
+                role: role.clone(),
+                author: Some(if role == "user" {
+                    "user".to_string()
+                } else {
+                    "copilot".to_string()
+                }),
+                created_at: ts,
+                content,
+                extra: event,
+                snippets: Vec::new(),
+            });
+        }
+
+        if messages.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        // Use session directory name as session ID if not found in events.
+        if session_id.is_none() {
+            session_id = path
+                .parent()
+                .and_then(|p| p.file_name())
+                .and_then(|n| n.to_str())
+                .map(String::from);
+        }
+
+        // Mirror timestamps if only one boundary is available.
+        if started_at.is_none() {
+            started_at = ended_at;
+        }
+        if ended_at.is_none() {
+            ended_at = started_at;
+        }
+
+        let title = messages.iter().find(|m| m.role == "user").map(|m| {
+            m.content
+                .lines()
+                .next()
+                .unwrap_or(&m.content)
+                .chars()
+                .take(120)
+                .collect::<String>()
+        });
+
+        let metadata = serde_json::json!({
+            "source": "copilot-cli",
+        });
+
+        Ok(vec![NormalizedConversation {
+            agent_slug: "copilot".to_string(),
+            external_id: session_id,
+            title,
+            workspace,
+            source_path: path.to_path_buf(),
+            started_at,
+            ended_at,
+            metadata,
+            messages,
+        }])
+    }
+
+    /// Parse a legacy CLI session-state JSON file (single JSON document).
+    ///
+    /// These are used by Copilot CLI v1 (`history-session-state/{id}.json`)
+    /// and checkpoint files. The format is a JSON object containing conversation
+    /// data, potentially with `messages`, `conversation`, or `events` arrays.
+    fn parse_cli_session_json(
+        &self,
+        val: &Value,
+        path: &Path,
+    ) -> Result<Vec<NormalizedConversation>> {
+        // If the document has a top-level "messages" or "conversation" array,
+        // treat it as a chat-style conversation and delegate to the existing parser.
+        if val.get("turns").is_some()
+            || val.get("messages").is_some()
+            || val.get("conversations").is_some()
+        {
+            return self.parse_conversation_file_from_value(val, path);
+        }
+
+        // Try extracting messages from "events" array (session-state checkpoint format).
+        let events = val
+            .get("events")
+            .and_then(|v| v.as_array())
+            .or_else(|| val.get("history").and_then(|v| v.as_array()));
+
+        let events = match events {
+            Some(e) => e,
+            None => {
+                // Fall back to treating the entire JSON as a single-conversation document.
+                return self.parse_conversation_file_from_value(val, path);
+            }
+        };
+
+        let mut messages = Vec::new();
+        let mut started_at: Option<i64> = None;
+        let mut ended_at: Option<i64> = None;
+
+        for event in events {
+            let event_type = event.get("type").and_then(|v| v.as_str()).unwrap_or("");
+            let ts = Self::extract_turn_timestamp(event);
+
+            started_at = match (started_at, ts) {
+                (Some(curr), Some(t)) => Some(curr.min(t)),
+                (None, Some(t)) => Some(t),
+                (other, None) => other,
+            };
+            ended_at = match (ended_at, ts) {
+                (Some(curr), Some(t)) => Some(curr.max(t)),
+                (None, Some(t)) => Some(t),
+                (other, None) => other,
+            };
+
+            let (role, content) = Self::extract_cli_event_message(event, event_type);
+            if role.is_empty() || content.trim().is_empty() {
+                continue;
+            }
+
+            messages.push(NormalizedMessage {
+                idx: i64::try_from(messages.len()).unwrap_or(i64::MAX),
+                role: role.clone(),
+                author: Some(if role == "user" {
+                    "user".to_string()
+                } else {
+                    "copilot".to_string()
+                }),
+                created_at: ts,
+                content,
+                extra: event.clone(),
+                snippets: Vec::new(),
+            });
+        }
+
+        if messages.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let session_id = val
+            .get("session_id")
+            .or_else(|| val.get("sessionId"))
+            .or_else(|| val.get("id"))
+            .and_then(|v| v.as_str())
+            .map(String::from)
+            .or_else(|| {
+                path.file_stem()
+                    .and_then(|n| n.to_str())
+                    .map(String::from)
+            });
+
+        let workspace = val
+            .get("cwd")
+            .or_else(|| val.get("workingDirectory"))
+            .or_else(|| val.get("workspace"))
+            .and_then(|v| v.as_str())
+            .map(PathBuf::from);
+
+        if started_at.is_none() {
+            started_at = ended_at;
+        }
+        if ended_at.is_none() {
+            ended_at = started_at;
+        }
+
+        let title = messages.iter().find(|m| m.role == "user").map(|m| {
+            m.content
+                .lines()
+                .next()
+                .unwrap_or(&m.content)
+                .chars()
+                .take(120)
+                .collect::<String>()
+        });
+
+        let metadata = serde_json::json!({
+            "source": "copilot-cli",
+        });
+
+        Ok(vec![NormalizedConversation {
+            agent_slug: "copilot".to_string(),
+            external_id: session_id,
+            title,
+            workspace,
+            source_path: path.to_path_buf(),
+            started_at,
+            ended_at,
+            metadata,
+            messages,
+        }])
+    }
+
+    /// Parse a JSON value through the existing VS Code conversation parser.
+    fn parse_conversation_file_from_value(
+        &self,
+        val: &Value,
+        path: &Path,
+    ) -> Result<Vec<NormalizedConversation>> {
+        let mut conversations = Vec::new();
+
+        let conv_array = if let Some(arr) = val.as_array() {
+            arr.clone()
+        } else if val
+            .get("conversations")
+            .and_then(|v| v.as_array())
+            .is_some()
+        {
+            val["conversations"].as_array().unwrap().clone()
+        } else if val.get("id").is_some()
+            || val.get("turns").is_some()
+            || val.get("messages").is_some()
+        {
+            vec![val.clone()]
+        } else {
+            return Ok(Vec::new());
+        };
+
+        for conv_val in &conv_array {
+            if let Some(parsed) = Self::parse_single_conversation(conv_val, path) {
+                conversations.push(parsed);
+            }
+        }
+
+        Ok(conversations)
+    }
+
+    /// Extract role and content from a CLI event log entry.
+    ///
+    /// Recognizes multiple event type naming conventions:
+    /// - `user.message` / `assistant.message` (documented Copilot CLI format)
+    /// - `userPromptSubmitted` / `assistantResponse` (hook event names)
+    /// - Events with explicit `role` field
+    fn extract_cli_event_message(event: &Value, event_type: &str) -> (String, String) {
+        let type_lower = event_type.to_lowercase();
+
+        // Determine role from event type.
+        let role_from_type = if type_lower.contains("user")
+            || type_lower == "userpromptsubmitted"
+            || type_lower == "prompt"
+        {
+            Some("user".to_string())
+        } else if type_lower.contains("assistant")
+            || type_lower == "assistantresponse"
+            || type_lower == "response"
+            || type_lower == "completion"
+        {
+            Some("assistant".to_string())
+        } else {
+            None
+        };
+
+        // Explicit role field takes precedence.
+        let role = event
+            .get("role")
+            .and_then(|v| v.as_str())
+            .map(|r| {
+                if r == "user" || r == "human" {
+                    "user".to_string()
+                } else {
+                    "assistant".to_string()
+                }
+            })
+            .or(role_from_type);
+
+        let role = match role {
+            Some(r) => r,
+            None => return (String::new(), String::new()),
+        };
+
+        // Extract content from various fields.
+        let content = Self::extract_message_content(event);
+
+        // If standard extraction failed, try event-specific fields.
+        if content.trim().is_empty() {
+            // Try "prompt" field for user messages.
+            if let Some(prompt) = event.get("prompt").or_else(|| event.get("initialPrompt")) {
+                let text = flatten_content(prompt);
+                if !text.is_empty() {
+                    return (role, text);
+                }
+            }
+            // Try "output" / "result" for assistant messages.
+            if let Some(output) = event.get("output").or_else(|| event.get("result")) {
+                let text = flatten_content(output);
+                if !text.is_empty() {
+                    return (role, text);
+                }
+            }
+        }
+
+        (role, content)
+    }
+
     /// Extract message content from various possible field names/shapes.
     fn extract_message_content(val: &Value) -> String {
         // Try "message" field (Copilot Chat turns format)
@@ -487,6 +918,7 @@ impl Connector for CopilotConnector {
             for scan_root in &ctx.scan_roots {
                 // Check common subdirectories within each scan root.
                 let candidates = [
+                    // VS Code Copilot Chat paths
                     scan_root
                         .path
                         .join(".config/Code/User/globalStorage/github.copilot-chat"),
@@ -504,6 +936,9 @@ impl Connector for CopilotConnector {
                         .join("AppData/Roaming/VSCodium/User/globalStorage/github.copilot-chat"),
                     scan_root.path.join(".config/gh-copilot"),
                     scan_root.path.join(".config/gh/copilot"),
+                    // Copilot CLI session-state paths
+                    scan_root.path.join(".copilot/session-state"),
+                    scan_root.path.join(".copilot/history-session-state"),
                 ];
 
                 for candidate in &candidates {
@@ -538,7 +973,14 @@ impl Connector for CopilotConnector {
                     continue;
                 }
 
-                match self.parse_conversation_file(&file) {
+                // Dispatch to the appropriate parser based on file type.
+                let result = if Self::is_cli_event_log(&file) {
+                    self.parse_cli_event_log(&file)
+                } else {
+                    self.parse_conversation_file(&file)
+                };
+
+                match result {
                     Ok(convs) => {
                         tracing::debug!(
                             file = %file.display(),
@@ -929,5 +1371,321 @@ mod tests {
         deduped.sort();
         deduped.dedup();
         assert_eq!(paths, deduped);
+    }
+
+    // --- Copilot CLI event log tests ---
+
+    #[test]
+    fn scan_parses_cli_events_jsonl() {
+        let tmp = TempDir::new().unwrap();
+        let session_dir = tmp.path().join(".copilot/session-state/abc-123");
+        fs::create_dir_all(&session_dir).unwrap();
+
+        let events = r#"{"type":"sessionStart","session_id":"abc-123","timestamp":1700000000000,"cwd":"/home/user/myproject"}
+{"type":"user.message","role":"user","content":"How do I read a file in Rust?","timestamp":1700000001000}
+{"type":"assistant.message","role":"assistant","content":"You can use std::fs::read_to_string() to read a file into a String.","timestamp":1700000002000}
+{"type":"user.message","role":"user","content":"Show me an example","timestamp":1700000003000}
+{"type":"assistant.message","role":"assistant","content":"let contents = std::fs::read_to_string(\"file.txt\")?;","timestamp":1700000004000}
+"#;
+
+        write_json(&session_dir, "events.jsonl", events);
+
+        let connector = CopilotConnector::new();
+        let root = tmp.path().join(".copilot/session-state");
+        let ctx = ScanContext::local_default(root, None);
+        let convs = connector.scan(&ctx).unwrap();
+
+        assert_eq!(convs.len(), 1);
+        assert_eq!(convs[0].agent_slug, "copilot");
+        assert_eq!(convs[0].external_id.as_deref(), Some("abc-123"));
+        assert_eq!(
+            convs[0].workspace,
+            Some(PathBuf::from("/home/user/myproject"))
+        );
+        assert_eq!(convs[0].messages.len(), 4);
+        assert_eq!(convs[0].messages[0].role, "user");
+        assert!(convs[0].messages[0].content.contains("read a file"));
+        assert_eq!(convs[0].messages[1].role, "assistant");
+        assert!(convs[0].messages[1].content.contains("read_to_string"));
+        assert_eq!(convs[0].messages[2].role, "user");
+        assert_eq!(convs[0].messages[3].role, "assistant");
+        assert_eq!(convs[0].started_at, Some(1_700_000_000_000));
+        assert_eq!(convs[0].ended_at, Some(1_700_000_004_000));
+        assert!(convs[0].title.as_ref().unwrap().contains("read a file"));
+    }
+
+    #[test]
+    fn scan_parses_cli_events_with_hook_event_types() {
+        let tmp = TempDir::new().unwrap();
+        let session_dir = tmp.path().join(".copilot/session-state/def-456");
+        fs::create_dir_all(&session_dir).unwrap();
+
+        // Using hook-style event names.
+        let events = r#"{"type":"userPromptSubmitted","content":"Explain ownership","timestamp":1700000010000}
+{"type":"assistantResponse","content":"Ownership is Rust's memory management model.","timestamp":1700000011000}
+"#;
+
+        write_json(&session_dir, "events.jsonl", events);
+
+        let connector = CopilotConnector::new();
+        let root = tmp.path().join(".copilot/session-state");
+        let ctx = ScanContext::local_default(root, None);
+        let convs = connector.scan(&ctx).unwrap();
+
+        assert_eq!(convs.len(), 1);
+        assert_eq!(convs[0].messages.len(), 2);
+        assert_eq!(convs[0].messages[0].role, "user");
+        assert!(convs[0].messages[0].content.contains("ownership"));
+        assert_eq!(convs[0].messages[1].role, "assistant");
+        assert!(convs[0].messages[1].content.contains("memory management"));
+    }
+
+    #[test]
+    fn scan_parses_cli_legacy_session_json() {
+        let tmp = TempDir::new().unwrap();
+        let legacy_dir = tmp.path().join(".copilot/history-session-state");
+        fs::create_dir_all(&legacy_dir).unwrap();
+
+        let session_json = r#"{
+            "session_id": "legacy-001",
+            "cwd": "/home/user/legacy-project",
+            "events": [
+                {"type": "user.message", "content": "What is a trait?", "timestamp": 1700000020000},
+                {"type": "assistant.message", "content": "A trait defines shared behavior.", "timestamp": 1700000021000}
+            ]
+        }"#;
+
+        write_json(&legacy_dir, "legacy-001.json", session_json);
+
+        let connector = CopilotConnector::new();
+        let root = tmp.path().join(".copilot/history-session-state");
+        let ctx = ScanContext::local_default(root, None);
+        let convs = connector.scan(&ctx).unwrap();
+
+        assert_eq!(convs.len(), 1);
+        assert_eq!(convs[0].external_id.as_deref(), Some("legacy-001"));
+        assert_eq!(
+            convs[0].workspace,
+            Some(PathBuf::from("/home/user/legacy-project"))
+        );
+        assert_eq!(convs[0].messages.len(), 2);
+        assert_eq!(convs[0].messages[0].role, "user");
+        assert!(convs[0].messages[0].content.contains("trait"));
+        assert_eq!(convs[0].messages[1].role, "assistant");
+    }
+
+    #[test]
+    fn scan_parses_cli_events_with_prompt_field() {
+        let tmp = TempDir::new().unwrap();
+        let session_dir = tmp.path().join(".copilot/session-state/ghi-789");
+        fs::create_dir_all(&session_dir).unwrap();
+
+        // Some events use "prompt" instead of "content".
+        let events = r#"{"type":"user.message","prompt":"Deploy to production","timestamp":1700000030000}
+{"type":"assistant.message","output":"Running deployment script...","timestamp":1700000031000}
+"#;
+
+        write_json(&session_dir, "events.jsonl", events);
+
+        let connector = CopilotConnector::new();
+        let root = tmp.path().join(".copilot/session-state");
+        let ctx = ScanContext::local_default(root, None);
+        let convs = connector.scan(&ctx).unwrap();
+
+        assert_eq!(convs.len(), 1);
+        assert_eq!(convs[0].messages.len(), 2);
+        assert_eq!(convs[0].messages[0].role, "user");
+        assert!(convs[0].messages[0].content.contains("Deploy"));
+        assert_eq!(convs[0].messages[1].role, "assistant");
+        assert!(convs[0].messages[1].content.contains("deployment"));
+    }
+
+    #[test]
+    fn scan_cli_events_skips_non_message_events() {
+        let tmp = TempDir::new().unwrap();
+        let session_dir = tmp.path().join(".copilot/session-state/skip-test");
+        fs::create_dir_all(&session_dir).unwrap();
+
+        let events = r#"{"type":"sessionStart","timestamp":1700000040000}
+{"type":"preToolUse","toolName":"shell","timestamp":1700000041000}
+{"type":"user.message","content":"Hello","timestamp":1700000042000}
+{"type":"postToolUse","toolName":"shell","timestamp":1700000043000}
+{"type":"assistant.message","content":"Hi there!","timestamp":1700000044000}
+{"type":"errorOccurred","error":"some error","timestamp":1700000045000}
+"#;
+
+        write_json(&session_dir, "events.jsonl", events);
+
+        let connector = CopilotConnector::new();
+        let root = tmp.path().join(".copilot/session-state");
+        let ctx = ScanContext::local_default(root, None);
+        let convs = connector.scan(&ctx).unwrap();
+
+        assert_eq!(convs.len(), 1);
+        // Only user.message and assistant.message events should produce messages.
+        assert_eq!(convs[0].messages.len(), 2);
+        assert_eq!(convs[0].messages[0].role, "user");
+        assert_eq!(convs[0].messages[0].content, "Hello");
+        assert_eq!(convs[0].messages[1].role, "assistant");
+        assert_eq!(convs[0].messages[1].content, "Hi there!");
+    }
+
+    #[test]
+    fn scan_cli_empty_events_returns_empty() {
+        let tmp = TempDir::new().unwrap();
+        let session_dir = tmp.path().join(".copilot/session-state/empty");
+        fs::create_dir_all(&session_dir).unwrap();
+
+        // Only non-message events.
+        let events = r#"{"type":"sessionStart","timestamp":1700000050000}
+{"type":"sessionEnd","timestamp":1700000051000}
+"#;
+
+        write_json(&session_dir, "events.jsonl", events);
+
+        let connector = CopilotConnector::new();
+        let root = tmp.path().join(".copilot/session-state");
+        let ctx = ScanContext::local_default(root, None);
+        let convs = connector.scan(&ctx).unwrap();
+        assert!(convs.is_empty());
+    }
+
+    #[test]
+    fn scan_cli_events_with_scan_roots() {
+        let tmp = TempDir::new().unwrap();
+        let home = tmp.path().join("fakehome");
+        let session_dir = home.join(".copilot/session-state/remote-sess");
+        fs::create_dir_all(&session_dir).unwrap();
+
+        let events = r#"{"type":"user.message","content":"from remote","timestamp":1700000060000}
+{"type":"assistant.message","content":"acknowledged","timestamp":1700000061000}
+"#;
+
+        write_json(&session_dir, "events.jsonl", events);
+
+        let connector = CopilotConnector::new();
+        let scan_root = crate::connectors::ScanRoot::local(home);
+        let ctx = ScanContext::with_roots(tmp.path().to_path_buf(), vec![scan_root], None);
+        let convs = connector.scan(&ctx).unwrap();
+
+        assert_eq!(convs.len(), 1);
+        assert_eq!(convs[0].messages.len(), 2);
+    }
+
+    #[test]
+    fn is_cli_event_log_detection() {
+        assert!(CopilotConnector::is_cli_event_log(Path::new(
+            "/home/user/.copilot/session-state/abc/events.jsonl"
+        )));
+        assert!(CopilotConnector::is_cli_event_log(Path::new(
+            "/tmp/test.jsonl"
+        )));
+        assert!(CopilotConnector::is_cli_event_log(Path::new(
+            "/home/user/.copilot/session-state/abc/checkpoint.json"
+        )));
+        assert!(CopilotConnector::is_cli_event_log(Path::new(
+            "/home/user/.copilot/history-session-state/old.json"
+        )));
+        assert!(!CopilotConnector::is_cli_event_log(Path::new(
+            "/home/user/.config/Code/User/globalStorage/github.copilot-chat/conversations.json"
+        )));
+    }
+
+    #[test]
+    fn looks_like_copilot_storage_with_cli_paths() {
+        assert!(CopilotConnector::looks_like_copilot_storage(Path::new(
+            "/home/user/.copilot/session-state"
+        )));
+        assert!(CopilotConnector::looks_like_copilot_storage(Path::new(
+            "/home/user/.copilot/history-session-state"
+        )));
+        assert!(CopilotConnector::looks_like_copilot_storage(Path::new(
+            "/home/user/.copilot/session-state/abc-123"
+        )));
+    }
+
+    #[test]
+    fn scan_multiple_cli_sessions() {
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path().join(".copilot/session-state");
+
+        let session_a = root.join("session-a");
+        let session_b = root.join("session-b");
+        fs::create_dir_all(&session_a).unwrap();
+        fs::create_dir_all(&session_b).unwrap();
+
+        write_json(
+            &session_a,
+            "events.jsonl",
+            r#"{"type":"user.message","content":"Question A","timestamp":1700000070000}
+{"type":"assistant.message","content":"Answer A","timestamp":1700000071000}
+"#,
+        );
+
+        write_json(
+            &session_b,
+            "events.jsonl",
+            r#"{"type":"user.message","content":"Question B","timestamp":1700000080000}
+{"type":"assistant.message","content":"Answer B","timestamp":1700000081000}
+"#,
+        );
+
+        let connector = CopilotConnector::new();
+        let ctx = ScanContext::local_default(root, None);
+        let convs = connector.scan(&ctx).unwrap();
+
+        assert_eq!(convs.len(), 2);
+        // Sessions should have different session IDs (from parent directory names).
+        let ids: Vec<_> = convs.iter().filter_map(|c| c.external_id.as_deref()).collect();
+        assert!(ids.contains(&"session-a"));
+        assert!(ids.contains(&"session-b"));
+    }
+
+    #[test]
+    fn scan_cli_events_with_malformed_lines() {
+        let tmp = TempDir::new().unwrap();
+        let session_dir = tmp.path().join(".copilot/session-state/malformed");
+        fs::create_dir_all(&session_dir).unwrap();
+
+        // Mix of valid and invalid JSONL lines.
+        let events = r#"not valid json
+{"type":"user.message","content":"valid msg","timestamp":1700000090000}
+{incomplete json...
+{"type":"assistant.message","content":"also valid","timestamp":1700000091000}
+
+"#;
+
+        write_json(&session_dir, "events.jsonl", events);
+
+        let connector = CopilotConnector::new();
+        let root = tmp.path().join(".copilot/session-state");
+        let ctx = ScanContext::local_default(root, None);
+        let convs = connector.scan(&ctx).unwrap();
+
+        assert_eq!(convs.len(), 1);
+        assert_eq!(convs[0].messages.len(), 2);
+        assert_eq!(convs[0].messages[0].content, "valid msg");
+        assert_eq!(convs[0].messages[1].content, "also valid");
+    }
+
+    #[test]
+    fn scan_cli_metadata_source_is_copilot_cli() {
+        let tmp = TempDir::new().unwrap();
+        let session_dir = tmp.path().join(".copilot/session-state/meta-test");
+        fs::create_dir_all(&session_dir).unwrap();
+
+        let events = r#"{"type":"user.message","content":"test","timestamp":1700000100000}
+{"type":"assistant.message","content":"reply","timestamp":1700000101000}
+"#;
+
+        write_json(&session_dir, "events.jsonl", events);
+
+        let connector = CopilotConnector::new();
+        let root = tmp.path().join(".copilot/session-state");
+        let ctx = ScanContext::local_default(root, None);
+        let convs = connector.scan(&ctx).unwrap();
+
+        assert_eq!(convs.len(), 1);
+        assert_eq!(convs[0].metadata["source"], "copilot-cli");
     }
 }
