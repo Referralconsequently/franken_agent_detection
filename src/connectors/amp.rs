@@ -147,14 +147,31 @@ impl Connector for AmpConnector {
                         |id| format!("amp:{id}"),
                     );
                     if seen_ids.insert(key) {
+                        // Use per-message timestamps when available, falling back
+                        // to the top-level "created" field (millisecond epoch) that
+                        // Amp stores on thread objects.
+                        let thread_created = val
+                            .get("created")
+                            .and_then(parse_timestamp);
+                        let started_at = messages
+                            .iter()
+                            .filter_map(|m| m.created_at)
+                            .min()
+                            .or(thread_created);
+                        let ended_at = messages
+                            .iter()
+                            .filter_map(|m| m.created_at)
+                            .max()
+                            .or(thread_created);
+
                         convs.push(NormalizedConversation {
                             agent_slug: "amp".into(),
                             external_id,
                             title,
                             workspace,
                             source_path: path.to_path_buf(),
-                            started_at: messages.iter().filter_map(|m| m.created_at).min(),
-                            ended_at: messages.iter().filter_map(|m| m.created_at).max(),
+                            started_at,
+                            ended_at,
                             metadata: val.clone(),
                             messages,
                         });
@@ -205,13 +222,14 @@ fn extract_messages(val: &Value, _since_ts: Option<i64>) -> Option<Vec<Normalize
         }
 
         // Use parse_timestamp to handle both i64 milliseconds and ISO-8601 strings
-        // Also check sentAt which Amp uses
+        // Also check sentAt which Amp uses, and "created" (millisecond epoch)
         let created_at = m
             .get("created_at")
             .or_else(|| m.get("createdAt"))
             .or_else(|| m.get("sentAt"))
             .or_else(|| m.get("timestamp"))
             .or_else(|| m.get("ts"))
+            .or_else(|| m.get("created"))
             .and_then(parse_timestamp);
         let author = m
             .get("author")
@@ -260,6 +278,24 @@ fn infer_workspace(val: &Value) -> Option<PathBuf> {
             return Some(PathBuf::from(p));
         }
     }
+
+    // Amp stores workspace at env.initial.trees[].uri (as a file:// URI or path)
+    if let Some(trees) = val
+        .get("env")
+        .and_then(|e| e.get("initial"))
+        .and_then(|i| i.get("trees"))
+        .and_then(|t| t.as_array())
+    {
+        for tree in trees {
+            if let Some(uri) = tree.get("uri").and_then(|u| u.as_str()) {
+                let path_str = uri.strip_prefix("file://").unwrap_or(uri);
+                if !path_str.is_empty() {
+                    return Some(PathBuf::from(path_str));
+                }
+            }
+        }
+    }
+
     None
 }
 
