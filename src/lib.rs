@@ -48,8 +48,8 @@ pub use connectors::{
     estimate_tokens_from_content, extract_claude_code_tokens, extract_codex_tokens,
     extract_tokens_for_agent, factory::FactoryConnector, file_modified_since, flatten_content,
     franken_detection_for_connector, gemini::GeminiConnector, get_connector_factories,
-    normalize_model, openclaw::OpenClawConnector, parse_timestamp, pi_agent::PiAgentConnector,
-    token_extraction, vibe::VibeConnector,
+    kimi::KimiConnector, normalize_model, openclaw::OpenClawConnector, parse_timestamp,
+    pi_agent::PiAgentConnector, qwen::QwenConnector, token_extraction, vibe::VibeConnector,
 };
 
 use serde::{Deserialize, Serialize};
@@ -123,9 +123,11 @@ const KNOWN_CONNECTORS: &[&str] = &[
     "gemini",
     "github-copilot",
     "goose",
+    "kimi",
     "opencode",
     "openclaw",
     "pi_agent",
+    "qwen",
     "vibe",
     "windsurf",
 ];
@@ -146,9 +148,11 @@ fn canonical_connector_slug(slug: &str) -> Option<&'static str> {
         "gemini" | "gemini-cli" => Some("gemini"),
         "github-copilot" | "copilot" => Some("github-copilot"),
         "goose" | "goose-ai" => Some("goose"),
+        "kimi" | "kimi-code" | "kimi-ai" => Some("kimi"),
         "opencode" | "open-code" => Some("opencode"),
         "openclaw" | "open-claw" => Some("openclaw"),
         "pi_agent" | "pi-agent" | "piagent" => Some("pi_agent"),
+        "qwen" | "qwen-code" | "qwen-cli" => Some("qwen"),
         "vibe" | "vibe-cli" => Some("vibe"),
         "windsurf" => Some("windsurf"),
         _ => None,
@@ -305,6 +309,10 @@ fn default_probe_roots(slug: &str) -> Vec<PathBuf> {
             push(&[".goose", "sessions"]);
             push(&[".goose"]);
         }
+        "kimi" => {
+            push(&[".kimi", "sessions"]);
+            push(&[".kimi"]);
+        }
         "opencode" => {
             push(&[".opencode"]);
             push(&[".config", "opencode"]);
@@ -315,6 +323,10 @@ fn default_probe_roots(slug: &str) -> Vec<PathBuf> {
         }
         "pi_agent" => {
             push(&[".pi", "agent", "sessions"]);
+        }
+        "qwen" => {
+            push(&[".qwen", "tmp"]);
+            push(&[".qwen"]);
         }
         "vibe" => {
             push(&[".vibe"]);
@@ -531,9 +543,11 @@ pub fn default_probe_paths_tilde() -> Vec<(&'static str, Vec<String>)> {
                     tilde(&[".copilot", "history-session-state"]),
                 ],
                 "goose" => vec![tilde(&[".goose", "sessions"])],
+                "kimi" => vec![tilde(&[".kimi", "sessions"])],
                 "opencode" => vec![tilde(&[".local", "share", "opencode"])],
                 "openclaw" => vec![tilde(&[".openclaw", "agents"])],
                 "pi_agent" => vec![tilde(&[".pi", "agent", "sessions"])],
+                "qwen" => vec![tilde(&[".qwen", "tmp"])],
                 "vibe" => vec![tilde(&[".vibe", "logs", "session"])],
                 "windsurf" => vec![tilde(&[".windsurf"])],
                 _ => vec![],

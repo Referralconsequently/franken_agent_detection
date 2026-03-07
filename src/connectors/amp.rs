@@ -1071,8 +1071,9 @@ mod tests {
     #[test]
     fn candidate_roots_includes_cache_root() {
         let roots = AmpConnector::candidate_roots();
-        let cache = AmpConnector::cache_root();
-        assert!(roots.contains(&cache));
+        if let Some(cache) = AmpConnector::cache_root() {
+            assert!(roots.contains(&cache));
+        }
     }
 
     // =========================================================================

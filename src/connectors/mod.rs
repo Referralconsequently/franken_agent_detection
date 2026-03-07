@@ -16,11 +16,13 @@ pub mod copilot_cli;
 pub mod cursor;
 pub mod factory;
 pub mod gemini;
+pub mod kimi;
 pub mod openclaw;
 #[cfg(feature = "opencode")]
 pub mod opencode;
 pub mod path_trie;
 pub mod pi_agent;
+pub mod qwen;
 pub mod scan;
 pub mod token_extraction;
 pub mod utils;
@@ -130,11 +132,13 @@ pub fn get_connector_factories() -> Vec<(&'static str, fn() -> Box<dyn Connector
         ("aider", || Box::new(aider::AiderConnector::new())),
         ("pi_agent", || Box::new(pi_agent::PiAgentConnector::new())),
         ("factory", || Box::new(factory::FactoryConnector::new())),
+        ("kimi", || Box::new(kimi::KimiConnector::new())),
         ("openclaw", || Box::new(openclaw::OpenClawConnector::new())),
         ("copilot", || Box::new(copilot::CopilotConnector::new())),
         ("copilot_cli", || {
             Box::new(copilot_cli::CopilotCliConnector::new())
         }),
+        ("qwen", || Box::new(qwen::QwenConnector::new())),
     ];
     #[cfg(feature = "opencode")]
     v.push(("opencode", || Box::new(opencode::OpenCodeConnector::new())));
