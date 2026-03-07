@@ -300,7 +300,15 @@ fn infer_workspace(val: &Value) -> Option<PathBuf> {
     {
         for tree in trees {
             if let Some(uri) = tree.get("uri").and_then(|u| u.as_str()) {
-                let path_str = uri.strip_prefix("file://").unwrap_or(uri);
+                let path_str = if let Some(stripped) = uri.strip_prefix("file://") {
+                    stripped
+                } else if !uri.contains("://") {
+                    // Bare path (no scheme), treat as filesystem path
+                    uri
+                } else {
+                    // Non-file scheme (ssh://, https://, vscode-remote://…) — skip
+                    continue;
+                };
                 if !path_str.is_empty() {
                     return Some(PathBuf::from(path_str));
                 }
