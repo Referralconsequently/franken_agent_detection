@@ -21,15 +21,24 @@ impl AmpConnector {
         Self
     }
 
-    fn cache_root() -> PathBuf {
-        // Check XDG_DATA_HOME first (important for testing and cross-platform consistency)
-        // Note: dirs::data_dir() on macOS ignores XDG_DATA_HOME
-        if let Ok(xdg) = dotenvy::var("XDG_DATA_HOME") {
-            return PathBuf::from(xdg).join("amp");
+    fn cache_root() -> Option<PathBuf> {
+        // Check actual environment variable first (not .env files — Amp relies on
+        // real shell environment, and dotenvy can mask the true XDG_DATA_HOME).
+        if let Ok(xdg) = std::env::var("XDG_DATA_HOME") {
+            let p = PathBuf::from(xdg).join("amp");
+            if p.exists() {
+                return Some(p);
+            }
         }
-        dirs::data_dir()
-            .unwrap_or_else(|| PathBuf::from("."))
-            .join("amp")
+        // Check XDG default (~/.local/share/amp) — Amp uses this on all platforms
+        if let Some(home) = dirs::home_dir() {
+            let xdg_default = home.join(".local").join("share").join("amp");
+            if xdg_default.exists() {
+                return Some(xdg_default);
+            }
+        }
+        // Fall back to platform-specific data dir (e.g. ~/Library/Application Support on macOS)
+        dirs::data_dir().map(|d| d.join("amp"))
     }
 
     fn vscode_global_storage() -> Vec<PathBuf> {
@@ -45,7 +54,10 @@ impl AmpConnector {
     }
 
     pub fn candidate_roots() -> Vec<PathBuf> {
-        let mut roots = vec![Self::cache_root()];
+        let mut roots = Vec::new();
+        if let Some(root) = Self::cache_root() {
+            roots.push(root);
+        }
         roots.extend(Self::vscode_global_storage());
         roots
     }
