@@ -28,6 +28,23 @@ pub fn parse_timestamp(val: &serde_json::Value) -> Option<i64> {
         };
         return Some(ts);
     }
+    // Handle JSON float numbers (e.g., 1700000000.5) — serde_json's as_i64()
+    // returns None for numbers with fractional parts, so check as_f64() too.
+    // Note: as_f64() also succeeds for integer Numbers, but those are already
+    // handled by as_i64() above.
+    if val.is_number() {
+        if let Some(f) = val.as_f64() {
+            if f.is_finite() && f > 0.0 {
+                #[allow(clippy::cast_possible_truncation)]
+                let ts = if f < 100_000_000_000.0 {
+                    (f * 1000.0).round() as i64
+                } else {
+                    f.round() as i64
+                };
+                return Some(ts);
+            }
+        }
+    }
     if let Some(s) = val.as_str() {
         if let Ok(num) = s.parse::<i64>() {
             let ts = if (0..100_000_000_000).contains(&num) {
