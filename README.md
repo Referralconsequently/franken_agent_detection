@@ -90,7 +90,7 @@ cargo add franken-agent-detection
 
 ```toml
 [dependencies]
-franken-agent-detection = "0.1.0"
+franken-agent-detection = "0.1.3"
 ```
 
 ### From source

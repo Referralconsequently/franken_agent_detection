@@ -8,15 +8,23 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 Repository: <https://github.com/Dicklesworthstone/franken_agent_detection>
 Crate: <https://crates.io/crates/franken-agent-detection>
 
-> **Release vs. tag:** v0.1.1 and v0.1.2 are git tags published to crates.io.
-> No formal GitHub Releases have been created. v0.1.0 was never published
+> **Release vs. tag:** v0.1.1 and v0.1.3 are the published crates.io releases.
+> v0.1.2 exists as a git tag but was never published to crates.io. No formal
+> GitHub Releases have been created. v0.1.0 was never published
 > (crates.io rejected it due to wildcard dependency versions).
 
 ---
 
-## [Unreleased] -- since v0.1.2
+## [Unreleased] -- since v0.1.3
 
-Work on `main` after the v0.1.2 tag (2026-03-02). Not yet published to crates.io.
+No unreleased changes yet.
+
+---
+
+## [0.1.3] -- 2026-03-21
+
+Work that accumulated on `main` after the v0.1.2 tag (2026-03-02), now
+published to crates.io as v0.1.3.
 
 ### New connectors
 
@@ -162,14 +170,15 @@ Initial public release. No git tag. Not published to crates.io (rejected due to 
 | 0.1.0 | claude, cline, codex, cursor, factory, gemini, github-copilot, opencode, windsurf | 9 |
 | 0.1.1 | aider, amp, chatgpt, clawdbot, openclaw, pi_agent, vibe | 16 |
 | 0.1.2 | continue, goose | 18 |
-| unreleased | copilot_cli, kimi, qwen | 21 |
+| 0.1.3 | copilot_cli, kimi, qwen | 21 |
 
 > Note: The `github-copilot` connector (VS Code Copilot Chat) was in the
 > detection registry since v0.1.0; the full session-parsing implementation
 > (`copilot.rs`) was added in v0.1.1, and the separate `copilot_cli` connector
-> for `gh copilot` CLI event logs arrived in the unreleased period.
+> for `gh copilot` CLI event logs arrived in v0.1.3.
 
-[Unreleased]: https://github.com/Dicklesworthstone/franken_agent_detection/compare/v0.1.2...HEAD
+[Unreleased]: https://github.com/Dicklesworthstone/franken_agent_detection/compare/v0.1.3...HEAD
+[0.1.3]: https://github.com/Dicklesworthstone/franken_agent_detection/compare/v0.1.2...v0.1.3
 [0.1.2]: https://github.com/Dicklesworthstone/franken_agent_detection/compare/v0.1.1...v0.1.2
 [0.1.1]: https://github.com/Dicklesworthstone/franken_agent_detection/compare/fa960bcdc294c9f7e16eafc5cbaf43b972c95eab...v0.1.1
 [0.1.0]: https://github.com/Dicklesworthstone/franken_agent_detection/commit/fa960bcdc294c9f7e16eafc5cbaf43b972c95eab

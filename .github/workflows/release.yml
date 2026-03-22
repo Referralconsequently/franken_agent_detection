@@ -86,7 +86,14 @@ jobs:
 
       - name: Publish
         if: ${{ env.CARGO_REGISTRY_TOKEN != '' }}
-        run: cargo publish --locked
+        run: |
+          cargo publish --locked || {
+            if cargo search franken-agent-detection | grep -q '^franken-agent-detection '; then
+              echo "franken-agent-detection already published"
+            else
+              exit 1
+            fi
+          }
 
       - name: Warn when token is missing
         if: ${{ env.CARGO_REGISTRY_TOKEN == '' }}
