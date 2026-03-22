@@ -238,11 +238,7 @@ fn extract_tool_call_text(payload: &Value) -> String {
             payload
                 .get("arguments")
                 .and_then(|a| a.as_str())
-                .or_else(|| {
-                    payload
-                        .get("parameters")
-                        .and_then(|p| p.as_str())
-                })
+                .or_else(|| payload.get("parameters").and_then(|p| p.as_str()))
         })
         .unwrap_or("");
 
@@ -296,9 +292,7 @@ fn parse_kimi_session(path: &Path) -> Result<Option<NormalizedConversation>> {
             (Some("TurnBegin"), _) => {
                 // TurnBegin signals a new turn; extract the role from the payload
                 let payload = msg.and_then(|m| m.get("payload"));
-                let turn_role = payload
-                    .and_then(|p| p.get("role"))
-                    .and_then(|v| v.as_str());
+                let turn_role = payload.and_then(|p| p.get("role")).and_then(|v| v.as_str());
 
                 let is_user = matches!(turn_role, Some("human" | "user"));
 
@@ -331,9 +325,7 @@ fn parse_kimi_session(path: &Path) -> Result<Option<NormalizedConversation>> {
             }
             (Some("ContentPart"), _) => {
                 let payload = msg.and_then(|m| m.get("payload"));
-                let content = payload
-                    .map(extract_content_part_text)
-                    .unwrap_or_default();
+                let content = payload.map(extract_content_part_text).unwrap_or_default();
 
                 if !content.trim().is_empty() {
                     messages.push(NormalizedMessage {
@@ -377,18 +369,15 @@ fn parse_kimi_session(path: &Path) -> Result<Option<NormalizedConversation>> {
     let session_id = infer_session_id(path);
     let workspace = infer_workspace(path);
 
-    let title = messages
-        .iter()
-        .find(|m| m.role == "user")
-        .map(|m| {
-            m.content
-                .lines()
-                .next()
-                .unwrap_or(&m.content)
-                .chars()
-                .take(100)
-                .collect::<String>()
-        });
+    let title = messages.iter().find(|m| m.role == "user").map(|m| {
+        m.content
+            .lines()
+            .next()
+            .unwrap_or(&m.content)
+            .chars()
+            .take(100)
+            .collect::<String>()
+    });
 
     Ok(Some(NormalizedConversation {
         agent_slug: "kimi".into(),
@@ -482,7 +471,11 @@ mod tests {
         assert_eq!(convs[0].messages[0].role, "user");
         assert_eq!(convs[0].messages[0].content, "Hello Kimi");
         assert_eq!(convs[0].messages[1].role, "assistant");
-        assert!(convs[0].messages[1].content.contains("Hello! How can I help"));
+        assert!(
+            convs[0].messages[1]
+                .content
+                .contains("Hello! How can I help")
+        );
     }
 
     #[test]
@@ -522,10 +515,7 @@ mod tests {
         let convs = connector.scan(&ctx).unwrap();
 
         assert_eq!(convs.len(), 1);
-        assert_eq!(
-            convs[0].external_id,
-            Some("my-session-uuid".to_string())
-        );
+        assert_eq!(convs[0].external_id, Some("my-session-uuid".to_string()));
     }
 
     #[test]

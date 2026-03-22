@@ -133,8 +133,8 @@ impl Connector for QwenConnector {
 
 /// Parse a Qwen session JSON file into a NormalizedConversation.
 fn parse_qwen_session(path: &Path) -> Result<Option<NormalizedConversation>> {
-    let content =
-        fs::read_to_string(path).with_context(|| format!("read qwen session {}", path.display()))?;
+    let content = fs::read_to_string(path)
+        .with_context(|| format!("read qwen session {}", path.display()))?;
 
     let val: Value = serde_json::from_str(&content)
         .with_context(|| format!("parse qwen session JSON {}", path.display()))?;
@@ -205,18 +205,15 @@ fn parse_qwen_session(path: &Path) -> Result<Option<NormalizedConversation>> {
     // Pattern: ~/.qwen/tmp/<project-hash>/chats/session-*.json
     let workspace = infer_workspace(path);
 
-    let title = messages
-        .iter()
-        .find(|m| m.role == "user")
-        .map(|m| {
-            m.content
-                .lines()
-                .next()
-                .unwrap_or(&m.content)
-                .chars()
-                .take(100)
-                .collect::<String>()
-        });
+    let title = messages.iter().find(|m| m.role == "user").map(|m| {
+        m.content
+            .lines()
+            .next()
+            .unwrap_or(&m.content)
+            .chars()
+            .take(100)
+            .collect::<String>()
+    });
 
     Ok(Some(NormalizedConversation {
         agent_slug: "qwen".into(),
@@ -743,11 +740,7 @@ mod tests {
         // Write a non-session JSON file
         let chats_dir = storage.join("proj1").join("chats");
         fs::create_dir_all(&chats_dir).unwrap();
-        fs::write(
-            chats_dir.join("config.json"),
-            r#"{"setting": "value"}"#,
-        )
-        .unwrap();
+        fs::write(chats_dir.join("config.json"), r#"{"setting": "value"}"#).unwrap();
 
         // Write a valid session file
         let session_json = r#"{

@@ -44,12 +44,12 @@ pub use connectors::{
     Connector, PathTrie, ScanContext, ScanRoot, WorkspaceCache, aider::AiderConnector,
     amp::AmpConnector, claude_code::ClaudeCodeConnector, clawdbot::ClawdbotConnector,
     cline::ClineConnector, codex::CodexConnector, copilot::CopilotConnector,
-    copilot_cli::CopilotCliConnector,
-    estimate_tokens_from_content, extract_claude_code_tokens, extract_codex_tokens,
-    extract_tokens_for_agent, factory::FactoryConnector, file_modified_since, flatten_content,
-    franken_detection_for_connector, gemini::GeminiConnector, get_connector_factories,
-    kimi::KimiConnector, normalize_model, openclaw::OpenClawConnector, parse_timestamp,
-    pi_agent::PiAgentConnector, qwen::QwenConnector, token_extraction, vibe::VibeConnector,
+    copilot_cli::CopilotCliConnector, estimate_tokens_from_content, extract_claude_code_tokens,
+    extract_codex_tokens, extract_tokens_for_agent, factory::FactoryConnector, file_modified_since,
+    flatten_content, franken_detection_for_connector, gemini::GeminiConnector,
+    get_connector_factories, kimi::KimiConnector, normalize_model, openclaw::OpenClawConnector,
+    parse_timestamp, pi_agent::PiAgentConnector, qwen::QwenConnector, token_extraction,
+    vibe::VibeConnector,
 };
 
 use serde::{Deserialize, Serialize};
@@ -214,6 +214,7 @@ fn env_override_roots(slug: &str) -> Option<Vec<PathBuf>> {
     }
 }
 
+#[allow(clippy::too_many_lines)]
 fn default_probe_roots(slug: &str) -> Vec<PathBuf> {
     let mut out = Vec::new();
     let mut push = |parts: &[&str]| {
@@ -435,6 +436,8 @@ fn validate_known_connectors(
 /// suitable for SSH probe scripts where the remote home directory is unknown.
 /// Each entry is `(slug, paths)` where `paths` are bash-friendly strings like
 /// `~/.claude/projects`.
+#[must_use]
+#[allow(clippy::too_many_lines)]
 pub fn default_probe_paths_tilde() -> Vec<(&'static str, Vec<String>)> {
     fn tilde(parts: &[&str]) -> String {
         let mut path = String::from("~/");
@@ -455,7 +458,11 @@ pub fn default_probe_paths_tilde() -> Vec<(&'static str, Vec<String>)> {
                 "amp" => vec![
                     tilde(&[".local", "share", "amp"]),
                     tilde(&[
-                        ".config", "Code", "User", "globalStorage", "sourcegraph.amp",
+                        ".config",
+                        "Code",
+                        "User",
+                        "globalStorage",
+                        "sourcegraph.amp",
                     ]),
                     tilde(&[
                         "Library",
@@ -472,10 +479,7 @@ pub fn default_probe_paths_tilde() -> Vec<(&'static str, Vec<String>)> {
                     "com.openai.chat",
                 ])],
                 "claude" => vec![tilde(&[".claude", "projects"]), tilde(&[".claude"])],
-                "clawdbot" => vec![
-                    tilde(&[".clawdbot", "sessions"]),
-                    tilde(&[".clawdbot"]),
-                ],
+                "clawdbot" => vec![tilde(&[".clawdbot", "sessions"]), tilde(&[".clawdbot"])],
                 "cline" => vec![
                     tilde(&[
                         ".config",
@@ -765,19 +769,19 @@ mod tests {
                 },
                 AgentDetectRootOverride {
                     slug: "amp".to_string(),
-                    root: amp_root.clone(),
+                    root: amp_root,
                 },
                 AgentDetectRootOverride {
                     slug: "chatgpt-desktop".to_string(),
-                    root: chatgpt_root.clone(),
+                    root: chatgpt_root,
                 },
                 AgentDetectRootOverride {
                     slug: "clawdbot".to_string(),
-                    root: clawdbot_sessions.clone(),
+                    root: clawdbot_sessions,
                 },
                 AgentDetectRootOverride {
                     slug: "open-claw".to_string(),
-                    root: openclaw_agents.clone(),
+                    root: openclaw_agents,
                 },
                 AgentDetectRootOverride {
                     slug: "pi-agent".to_string(),
@@ -785,7 +789,7 @@ mod tests {
                 },
                 AgentDetectRootOverride {
                     slug: "vibe-cli".to_string(),
-                    root: vibe_sessions.clone(),
+                    root: vibe_sessions,
                 },
             ],
         })

@@ -162,9 +162,7 @@ impl Connector for AmpConnector {
                         // Use per-message timestamps when available, falling back
                         // to the top-level "created" field (millisecond epoch) that
                         // Amp stores on thread objects.
-                        let thread_created = val
-                            .get("created")
-                            .and_then(parse_timestamp);
+                        let thread_created = val.get("created").and_then(parse_timestamp);
                         let started_at = messages
                             .iter()
                             .filter_map(|m| m.created_at)

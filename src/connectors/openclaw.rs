@@ -16,10 +16,7 @@ use serde_json::Value;
 use walkdir::WalkDir;
 
 use super::scan::ScanContext;
-use super::{
-    Connector, file_modified_since, flatten_content,
-    parse_timestamp,
-};
+use super::{Connector, file_modified_since, flatten_content, parse_timestamp};
 use crate::types::{DetectionResult, NormalizedConversation, NormalizedMessage};
 
 pub struct OpenClawConnector;

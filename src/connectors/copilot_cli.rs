@@ -271,11 +271,7 @@ impl CopilotCliConnector {
     }
 
     /// Parse a legacy CLI session-state JSON file (single JSON document).
-    fn parse_session_json(
-        &self,
-        val: &Value,
-        path: &Path,
-    ) -> Result<Vec<NormalizedConversation>> {
+    fn parse_session_json(&self, val: &Value, path: &Path) -> Result<Vec<NormalizedConversation>> {
         // Try extracting messages from "events" or "history" arrays.
         let events = val
             .get("events")
@@ -348,11 +344,7 @@ impl CopilotCliConnector {
             .or_else(|| val.get("id"))
             .and_then(|v| v.as_str())
             .map(String::from)
-            .or_else(|| {
-                path.file_stem()
-                    .and_then(|n| n.to_str())
-                    .map(String::from)
-            });
+            .or_else(|| path.file_stem().and_then(|n| n.to_str()).map(String::from));
 
         let workspace = val
             .get("cwd")

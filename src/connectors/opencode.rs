@@ -115,9 +115,11 @@ impl OpenCodeConnector {
         // store them as ISO text (YYYY-MM-DD HH:MM:SS) or epoch integers depending on config.
         // We normalize in Rust rather than using strftime() which breaks on integer columns.
         let mut sessions: Vec<SqliteSession> = Vec::new();
-        let mut stmt = conn.prepare(
-            "SELECT id, title, directory, project_id, time_created, time_updated FROM session"
-        ).with_context(|| "failed to prepare session query")?;
+        let mut stmt = conn
+            .prepare(
+                "SELECT id, title, directory, project_id, time_created, time_updated FROM session",
+            )
+            .with_context(|| "failed to prepare session query")?;
 
         let row_fn = |row: &rusqlite::Row<'_>| -> rusqlite::Result<SqliteSession> {
             Ok(SqliteSession {
@@ -208,10 +210,7 @@ impl OpenCodeConnector {
     }
 
     /// Load messages + parts for a session from SQLite.
-    fn load_messages_sqlite(
-        conn: &Connection,
-        session_id: &str,
-    ) -> Result<Vec<NormalizedMessage>> {
+    fn load_messages_sqlite(conn: &Connection, session_id: &str) -> Result<Vec<NormalizedMessage>> {
         // Query messages for this session. Read time_created as raw value since
         // Drizzle ORM may store it as TEXT or INTEGER.
         let mut stmt = conn.prepare(
@@ -257,10 +256,12 @@ impl OpenCodeConnector {
 
             let role = msg_data.role.unwrap_or_else(|| "assistant".to_string());
             // Prefer JSON-embedded timestamp, fall back to column timestamp
-            let col_ts = time_created_raw.as_ref().and_then(normalize_sqlite_ts_value);
-            let created_at = normalize_opencode_timestamp(
-                msg_data.time.as_ref().and_then(|t| t.created)
-            ).or(col_ts);
+            let col_ts = time_created_raw
+                .as_ref()
+                .and_then(normalize_sqlite_ts_value);
+            let created_at =
+                normalize_opencode_timestamp(msg_data.time.as_ref().and_then(|t| t.created))
+                    .or(col_ts);
 
             let author = if role == "assistant" {
                 msg_data.model_id.clone()
@@ -301,9 +302,8 @@ impl OpenCodeConnector {
 
     /// Load parts for a message from SQLite.
     fn load_parts_sqlite(conn: &Connection, message_id: &str) -> Result<Vec<PartInfo>> {
-        let mut stmt = conn.prepare(
-            "SELECT data FROM part WHERE message_id = ? ORDER BY time_created ASC"
-        )?;
+        let mut stmt =
+            conn.prepare("SELECT data FROM part WHERE message_id = ? ORDER BY time_created ASC")?;
 
         let rows = stmt.query_map([message_id], |row| {
             let data: String = row.get(0)?;
@@ -457,21 +457,20 @@ impl Connector for OpenCodeConnector {
 
         // --- Phase 1: Try SQLite database (v1.2+) ---
         // Check for explicit db path override, then default locations.
-        let db_path = if ctx.data_dir.exists()
-            && ctx.data_dir.extension().is_some_and(|ext| ext == "db")
-        {
-            Some(ctx.data_dir.clone())
-        } else if ctx.use_default_detection() {
-            Self::sqlite_db_path()
-        } else {
-            // data_dir might be the parent containing opencode.db
-            let candidate = ctx.data_dir.join("opencode.db");
-            if candidate.exists() {
-                Some(candidate)
+        let db_path =
+            if ctx.data_dir.exists() && ctx.data_dir.extension().is_some_and(|ext| ext == "db") {
+                Some(ctx.data_dir.clone())
+            } else if ctx.use_default_detection() {
+                Self::sqlite_db_path()
             } else {
-                None
-            }
-        };
+                // data_dir might be the parent containing opencode.db
+                let candidate = ctx.data_dir.join("opencode.db");
+                if candidate.exists() {
+                    Some(candidate)
+                } else {
+                    None
+                }
+            };
 
         if let Some(db) = db_path {
             match Self::extract_from_sqlite(&db, ctx.since_ts) {
@@ -490,10 +489,8 @@ impl Connector for OpenCodeConnector {
         }
 
         // Collect seen IDs from SQLite results to avoid duplicates with JSON
-        let mut seen_ids: HashSet<String> = convs
-            .iter()
-            .filter_map(|c| c.external_id.clone())
-            .collect();
+        let mut seen_ids: HashSet<String> =
+            convs.iter().filter_map(|c| c.external_id.clone()).collect();
 
         // --- Phase 2: Fall back to JSON file storage (pre-v1.2) ---
         let storage_root = if ctx.use_default_detection() {
@@ -649,17 +646,13 @@ fn normalize_sqlite_ts_value(val: &rusqlite::types::Value) -> Option<i64> {
             // Try common SQLite/Drizzle datetime formats (space separator)
             if let Ok(dt) = chrono::NaiveDateTime::parse_from_str(s, "%Y-%m-%d %H:%M:%S") {
                 Some(dt.and_utc().timestamp_millis())
-            } else if let Ok(dt) =
-                chrono::NaiveDateTime::parse_from_str(s, "%Y-%m-%d %H:%M:%S%.f")
+            } else if let Ok(dt) = chrono::NaiveDateTime::parse_from_str(s, "%Y-%m-%d %H:%M:%S%.f")
             {
                 Some(dt.and_utc().timestamp_millis())
             // ISO 8601 with T separator
-            } else if let Ok(dt) =
-                chrono::NaiveDateTime::parse_from_str(s, "%Y-%m-%dT%H:%M:%S")
-            {
+            } else if let Ok(dt) = chrono::NaiveDateTime::parse_from_str(s, "%Y-%m-%dT%H:%M:%S") {
                 Some(dt.and_utc().timestamp_millis())
-            } else if let Ok(dt) =
-                chrono::NaiveDateTime::parse_from_str(s, "%Y-%m-%dT%H:%M:%S%.f")
+            } else if let Ok(dt) = chrono::NaiveDateTime::parse_from_str(s, "%Y-%m-%dT%H:%M:%S%.f")
             {
                 Some(dt.and_utc().timestamp_millis())
             // RFC 3339 with timezone (e.g. "2024-01-15T14:30:00Z")
@@ -2464,8 +2457,9 @@ mod tests {
                 data TEXT NOT NULL,
                 time_created TEXT DEFAULT CURRENT_TIMESTAMP,
                 time_updated TEXT DEFAULT CURRENT_TIMESTAMP
-            );"
-        ).unwrap();
+            );",
+        )
+        .unwrap();
 
         db_path
     }
@@ -2479,27 +2473,50 @@ mod tests {
         conn.execute(
             "INSERT INTO session (id, project_id, title, directory) VALUES (?1, ?2, ?3, ?4)",
             ["sess-1", "proj-1", "Test Session", "/home/user/project"],
-        ).unwrap();
+        )
+        .unwrap();
 
         conn.execute(
             "INSERT INTO message (id, session_id, data) VALUES (?1, ?2, ?3)",
-            ["msg-1", "sess-1", r#"{"role":"user","time":{"created":1700000000000}}"#],
-        ).unwrap();
+            [
+                "msg-1",
+                "sess-1",
+                r#"{"role":"user","time":{"created":1700000000000}}"#,
+            ],
+        )
+        .unwrap();
 
         conn.execute(
             "INSERT INTO part (id, message_id, session_id, data) VALUES (?1, ?2, ?3, ?4)",
-            ["part-1", "msg-1", "sess-1", r#"{"type":"text","text":"Hello world"}"#],
-        ).unwrap();
+            [
+                "part-1",
+                "msg-1",
+                "sess-1",
+                r#"{"type":"text","text":"Hello world"}"#,
+            ],
+        )
+        .unwrap();
 
         conn.execute(
             "INSERT INTO message (id, session_id, data) VALUES (?1, ?2, ?3)",
-            ["msg-2", "sess-1", r#"{"role":"assistant","time":{"created":1700000001000},"modelID":"claude-3"}"#],
-        ).unwrap();
+            [
+                "msg-2",
+                "sess-1",
+                r#"{"role":"assistant","time":{"created":1700000001000},"modelID":"claude-3"}"#,
+            ],
+        )
+        .unwrap();
 
         conn.execute(
             "INSERT INTO part (id, message_id, session_id, data) VALUES (?1, ?2, ?3, ?4)",
-            ["part-2", "msg-2", "sess-1", r#"{"type":"text","text":"Hi there!"}"#],
-        ).unwrap();
+            [
+                "part-2",
+                "msg-2",
+                "sess-1",
+                r#"{"type":"text","text":"Hi there!"}"#,
+            ],
+        )
+        .unwrap();
 
         drop(conn);
 
@@ -2533,7 +2550,8 @@ mod tests {
         conn.execute(
             "INSERT INTO session (id, title) VALUES (?1, ?2)",
             ["sess-empty", "Empty Session"],
-        ).unwrap();
+        )
+        .unwrap();
 
         // Session with no messages should be skipped
         drop(conn);
@@ -2551,24 +2569,38 @@ mod tests {
         conn.execute(
             "INSERT INTO session (id, title) VALUES (?1, ?2)",
             ["sess-tools", "Tool Session"],
-        ).unwrap();
+        )
+        .unwrap();
 
         conn.execute(
             "INSERT INTO message (id, session_id, data) VALUES (?1, ?2, ?3)",
             ["msg-t1", "sess-tools", r#"{"role":"assistant"}"#],
-        ).unwrap();
+        )
+        .unwrap();
 
         // Text part
         conn.execute(
             "INSERT INTO part (id, message_id, session_id, data) VALUES (?1, ?2, ?3, ?4)",
-            ["p1", "msg-t1", "sess-tools", r#"{"type":"text","text":"Let me check that."}"#],
-        ).unwrap();
+            [
+                "p1",
+                "msg-t1",
+                "sess-tools",
+                r#"{"type":"text","text":"Let me check that."}"#,
+            ],
+        )
+        .unwrap();
 
         // Tool part with output
         conn.execute(
             "INSERT INTO part (id, message_id, session_id, data) VALUES (?1, ?2, ?3, ?4)",
-            ["p2", "msg-t1", "sess-tools", r#"{"type":"tool","state":{"output":"file.rs: 42 lines"}}"#],
-        ).unwrap();
+            [
+                "p2",
+                "msg-t1",
+                "sess-tools",
+                r#"{"type":"tool","state":{"output":"file.rs: 42 lines"}}"#,
+            ],
+        )
+        .unwrap();
 
         drop(conn);
 
@@ -2590,15 +2622,23 @@ mod tests {
             conn.execute(
                 "INSERT INTO session (id, title) VALUES (?1, ?2)",
                 [*sid, *title],
-            ).unwrap();
+            )
+            .unwrap();
             conn.execute(
                 "INSERT INTO message (id, session_id, data) VALUES (?1, ?2, ?3)",
                 [&format!("msg-{sid}"), *sid, r#"{"role":"user"}"#],
-            ).unwrap();
+            )
+            .unwrap();
             conn.execute(
                 "INSERT INTO part (id, message_id, session_id, data) VALUES (?1, ?2, ?3, ?4)",
-                [&format!("p-{sid}"), &format!("msg-{sid}"), *sid, r#"{"type":"text","text":"Hello"}"#],
-            ).unwrap();
+                [
+                    &format!("p-{sid}"),
+                    &format!("msg-{sid}"),
+                    *sid,
+                    r#"{"type":"text","text":"Hello"}"#,
+                ],
+            )
+            .unwrap();
         }
 
         drop(conn);
@@ -2639,8 +2679,9 @@ mod tests {
                 data TEXT NOT NULL,
                 time_created INTEGER,
                 time_updated INTEGER
-            );"
-        ).unwrap();
+            );",
+        )
+        .unwrap();
 
         // Insert session with epoch second timestamps
         conn.execute(
@@ -2651,12 +2692,19 @@ mod tests {
         conn.execute(
             "INSERT INTO message (id, session_id, data, time_created) VALUES (?1, ?2, ?3, ?4)",
             rusqlite::params!["msg-int", "sess-int", r#"{"role":"user"}"#, 1700000050_i64],
-        ).unwrap();
+        )
+        .unwrap();
 
         conn.execute(
             "INSERT INTO part (id, message_id, session_id, data) VALUES (?1, ?2, ?3, ?4)",
-            ["part-int", "msg-int", "sess-int", r#"{"type":"text","text":"Integer timestamps!"}"#],
-        ).unwrap();
+            [
+                "part-int",
+                "msg-int",
+                "sess-int",
+                r#"{"type":"text","text":"Integer timestamps!"}"#,
+            ],
+        )
+        .unwrap();
 
         drop(conn);
 
@@ -2677,15 +2725,23 @@ mod tests {
         conn.execute(
             "INSERT INTO session (id, project_id, title) VALUES (?1, ?2, ?3)",
             ["sess-meta", "proj-meta", "Meta Session"],
-        ).unwrap();
+        )
+        .unwrap();
         conn.execute(
             "INSERT INTO message (id, session_id, data) VALUES (?1, ?2, ?3)",
             ["msg-meta", "sess-meta", r#"{"role":"user"}"#],
-        ).unwrap();
+        )
+        .unwrap();
         conn.execute(
             "INSERT INTO part (id, message_id, session_id, data) VALUES (?1, ?2, ?3, ?4)",
-            ["p-meta", "msg-meta", "sess-meta", r#"{"type":"text","text":"Test"}"#],
-        ).unwrap();
+            [
+                "p-meta",
+                "msg-meta",
+                "sess-meta",
+                r#"{"type":"text","text":"Test"}"#,
+            ],
+        )
+        .unwrap();
 
         drop(conn);
 

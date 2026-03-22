@@ -148,9 +148,7 @@ impl CopilotConnector {
             .collect();
 
         if segments.iter().any(|segment| {
-            segment == "github.copilot-chat"
-                || segment == "copilot-chat"
-                || segment == "gh-copilot"
+            segment == "github.copilot-chat" || segment == "copilot-chat" || segment == "gh-copilot"
         }) {
             return true;
         }
@@ -696,11 +694,7 @@ impl CopilotConnector {
             .or_else(|| val.get("id"))
             .and_then(|v| v.as_str())
             .map(String::from)
-            .or_else(|| {
-                path.file_stem()
-                    .and_then(|n| n.to_str())
-                    .map(String::from)
-            });
+            .or_else(|| path.file_stem().and_then(|n| n.to_str()).map(String::from));
 
         let workspace = val
             .get("cwd")
@@ -1636,7 +1630,10 @@ mod tests {
 
         assert_eq!(convs.len(), 2);
         // Sessions should have different session IDs (from parent directory names).
-        let ids: Vec<_> = convs.iter().filter_map(|c| c.external_id.as_deref()).collect();
+        let ids: Vec<_> = convs
+            .iter()
+            .filter_map(|c| c.external_id.as_deref())
+            .collect();
         assert!(ids.contains(&"session-a"));
         assert!(ids.contains(&"session-b"));
     }
