@@ -6,7 +6,6 @@
 
 <div align="center">
 
-[![CI](https://github.com/Dicklesworthstone/franken_agent_detection/actions/workflows/ci.yml/badge.svg)](https://github.com/Dicklesworthstone/franken_agent_detection/actions/workflows/ci.yml)
 [![crates.io](https://img.shields.io/crates/v/franken-agent-detection.svg)](https://crates.io/crates/franken-agent-detection)
 [![docs.rs](https://img.shields.io/docsrs/franken-agent-detection)](https://docs.rs/franken-agent-detection)
 [![License: MIT](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
