@@ -54,6 +54,14 @@ pub trait Connector {
     /// Scan conversation history for this agent.
     fn scan(&self, ctx: &ScanContext) -> anyhow::Result<Vec<NormalizedConversation>>;
 
+    /// Whether this connector implements true callback-based streaming.
+    ///
+    /// Connectors that return `true` guarantee `scan_with_callback()` does not
+    /// first materialize the full corpus via `scan()`.
+    fn supports_streaming_scan(&self) -> bool {
+        false
+    }
+
     /// Scan conversation history and emit conversations incrementally.
     ///
     /// Connectors that can stream their traversal should override this to avoid

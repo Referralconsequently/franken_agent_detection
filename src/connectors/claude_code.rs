@@ -323,6 +323,10 @@ impl Connector for ClaudeCodeConnector {
         Ok(convs)
     }
 
+    fn supports_streaming_scan(&self) -> bool {
+        true
+    }
+
     fn scan_with_callback(
         &self,
         ctx: &ScanContext,
