@@ -719,7 +719,10 @@ mod tests {
 
         let compact = CodexConnector::compact_message_extra(&raw);
         assert_eq!(compact["cass"]["model"], "gpt-5-codex");
-        assert_eq!(compact["cass"]["attachments"][0]["path"], "/tmp/screenshot.png");
+        assert_eq!(
+            compact["cass"]["attachments"][0]["path"],
+            "/tmp/screenshot.png"
+        );
         assert!(compact.get("payload").is_none());
     }
 

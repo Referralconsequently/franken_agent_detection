@@ -630,13 +630,15 @@ mod tests {
 
     #[test]
     fn should_compact_large_message_extra_respects_threshold() {
-        assert!(!ClaudeCodeConnector::should_compact_large_message_extra(Some(
-            LARGE_SESSION_EXTRA_COMPACT_THRESHOLD_BYTES - 1,
-        )));
-        assert!(ClaudeCodeConnector::should_compact_large_message_extra(Some(
-            LARGE_SESSION_EXTRA_COMPACT_THRESHOLD_BYTES,
-        )));
-        assert!(!ClaudeCodeConnector::should_compact_large_message_extra(None));
+        assert!(!ClaudeCodeConnector::should_compact_large_message_extra(
+            Some(LARGE_SESSION_EXTRA_COMPACT_THRESHOLD_BYTES - 1,)
+        ));
+        assert!(ClaudeCodeConnector::should_compact_large_message_extra(
+            Some(LARGE_SESSION_EXTRA_COMPACT_THRESHOLD_BYTES,)
+        ));
+        assert!(!ClaudeCodeConnector::should_compact_large_message_extra(
+            None
+        ));
     }
 
     #[test]
