@@ -53,6 +53,22 @@ pub trait Connector {
 
     /// Scan conversation history for this agent.
     fn scan(&self, ctx: &ScanContext) -> anyhow::Result<Vec<NormalizedConversation>>;
+
+    /// Scan conversation history and emit conversations incrementally.
+    ///
+    /// Connectors that can stream their traversal should override this to avoid
+    /// materializing their full corpus in memory. The default implementation
+    /// preserves current behavior by delegating to `scan()`.
+    fn scan_with_callback(
+        &self,
+        ctx: &ScanContext,
+        on_conversation: &mut dyn FnMut(NormalizedConversation) -> anyhow::Result<()>,
+    ) -> anyhow::Result<()> {
+        for conversation in self.scan(ctx)? {
+            on_conversation(conversation)?;
+        }
+        Ok(())
+    }
 }
 
 /// Map connector slugs to franken-agent-detection slugs.

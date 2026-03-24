@@ -138,314 +138,303 @@ fn update_time_bounds(started_at: &mut Option<i64>, ended_at: &mut Option<i64>, 
     }
 }
 
+fn scan_codex_with_callback(
+    ctx: &ScanContext,
+    on_conversation: &mut dyn FnMut(NormalizedConversation) -> Result<()>,
+) -> Result<()> {
+    let is_codex_dir = ctx
+        .data_dir
+        .to_str()
+        .map(|s| s.contains(".codex") || s.ends_with("/codex") || s.ends_with("\\codex"))
+        .unwrap_or(false)
+        && ctx.data_dir.join("sessions").exists();
+
+    let roots: Vec<PathBuf> = if ctx.use_default_detection() {
+        if is_codex_dir {
+            vec![ctx.data_dir.clone()]
+        } else {
+            vec![CodexConnector::home()]
+        }
+    } else {
+        ctx.scan_roots.iter().map(|r| r.path.clone()).collect()
+    };
+
+    if roots.is_empty() {
+        return Ok(());
+    }
+
+    for mut home in roots {
+        if home.is_file() {
+            home = home.parent().unwrap_or(&home).to_path_buf();
+        }
+        if !home.exists() {
+            continue;
+        }
+
+        let files = CodexConnector::rollout_files(&home);
+
+        for file in files {
+            let source_path = file.clone();
+            if !file_modified_since(&file, ctx.since_ts) {
+                continue;
+            }
+            let sessions_dir = CodexConnector::sessions_dir(&home);
+            let external_id = source_path
+                .strip_prefix(&sessions_dir)
+                .ok()
+                .and_then(|rel| {
+                    rel.with_extension("")
+                        .to_str()
+                        .map(std::string::ToString::to_string)
+                })
+                .or_else(|| {
+                    source_path
+                        .file_stem()
+                        .and_then(|s| s.to_str())
+                        .map(std::string::ToString::to_string)
+                });
+            let ext = file.extension().and_then(|e| e.to_str());
+            let mut messages = Vec::new();
+            let mut started_at = None;
+            let mut ended_at = None;
+            let mut session_cwd: Option<PathBuf> = None;
+
+            if ext == Some("jsonl") {
+                let f = std::fs::File::open(&file)
+                    .with_context(|| format!("open rollout {}", file.display()))?;
+                let reader = std::io::BufReader::new(f);
+
+                for (line_idx, line_res) in std::io::BufRead::lines(reader).enumerate() {
+                    let line = match line_res {
+                        Ok(l) => l,
+                        Err(_) => continue,
+                    };
+                    if line.trim().is_empty() {
+                        continue;
+                    }
+                    let val: Value = match serde_json::from_str(&line) {
+                        Ok(v) => v,
+                        Err(_) => continue,
+                    };
+
+                    let entry_type = val.get("type").and_then(|v| v.as_str()).unwrap_or("");
+                    let created = val.get("timestamp").and_then(parse_timestamp);
+
+                    match entry_type {
+                        "session_meta" => {
+                            if let Some(payload) = val.get("payload") {
+                                session_cwd = payload
+                                    .get("cwd")
+                                    .and_then(|v| v.as_str())
+                                    .map(PathBuf::from);
+                            }
+                            update_time_bounds(&mut started_at, &mut ended_at, created);
+                        }
+                        "response_item" => {
+                            if let Some(payload) = val.get("payload") {
+                                let role = payload
+                                    .get("role")
+                                    .and_then(|v| v.as_str())
+                                    .unwrap_or("agent");
+
+                                let content_str = payload
+                                    .get("content")
+                                    .map(flatten_content)
+                                    .unwrap_or_default();
+
+                                if content_str.trim().is_empty() {
+                                    continue;
+                                }
+
+                                update_time_bounds(&mut started_at, &mut ended_at, created);
+
+                                messages.push(NormalizedMessage {
+                                    idx: 0,
+                                    role: role.to_string(),
+                                    author: None,
+                                    created_at: created,
+                                    content: content_str,
+                                    extra: val,
+                                    snippets: Vec::new(),
+                                });
+                            }
+                        }
+                        "event_msg" => {
+                            if let Some(payload) = val.get("payload") {
+                                let event_type = payload.get("type").and_then(|v| v.as_str());
+
+                                match event_type {
+                                    Some("user_message") => {
+                                        let text = payload
+                                            .get("message")
+                                            .and_then(|v| v.as_str())
+                                            .unwrap_or("");
+                                        if !text.is_empty() {
+                                            update_time_bounds(
+                                                &mut started_at,
+                                                &mut ended_at,
+                                                created,
+                                            );
+                                            messages.push(NormalizedMessage {
+                                                idx: 0,
+                                                role: "user".to_string(),
+                                                author: None,
+                                                created_at: created,
+                                                content: text.to_string(),
+                                                extra: val,
+                                                snippets: Vec::new(),
+                                            });
+                                        }
+                                    }
+                                    Some("agent_reasoning") => {
+                                        let text = payload
+                                            .get("text")
+                                            .and_then(|v| v.as_str())
+                                            .unwrap_or("");
+                                        if !text.is_empty() {
+                                            update_time_bounds(
+                                                &mut started_at,
+                                                &mut ended_at,
+                                                created,
+                                            );
+                                            messages.push(NormalizedMessage {
+                                                idx: 0,
+                                                role: "assistant".to_string(),
+                                                author: Some("reasoning".to_string()),
+                                                created_at: created,
+                                                content: text.to_string(),
+                                                extra: val,
+                                                snippets: Vec::new(),
+                                            });
+                                        }
+                                    }
+                                    Some("token_count") => {
+                                        if let Some(token_usage) =
+                                            CodexConnector::token_usage_from_payload(payload)
+                                        {
+                                            CodexConnector::attach_token_usage_to_latest_assistant(
+                                                &mut messages,
+                                                token_usage,
+                                                &source_path,
+                                                line_idx + 1,
+                                            );
+                                        } else {
+                                            tracing::debug!(
+                                                path = %source_path.display(),
+                                                line_number = line_idx + 1,
+                                                "codex token_count event missing token fields; skipping"
+                                            );
+                                        }
+                                    }
+                                    _ => {}
+                                }
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+                crate::types::reindex_messages(&mut messages);
+            } else if ext == Some("json") {
+                let content = fs::read_to_string(&file)
+                    .with_context(|| format!("read rollout {}", file.display()))?;
+                let val: Value = match serde_json::from_str(&content) {
+                    Ok(v) => v,
+                    Err(_) => continue,
+                };
+
+                session_cwd = val
+                    .get("session")
+                    .and_then(|s| s.get("cwd"))
+                    .and_then(|v| v.as_str())
+                    .map(PathBuf::from);
+
+                if let Some(items) = val.get("items").and_then(|v| v.as_array()) {
+                    for item in items {
+                        let role = item.get("role").and_then(|v| v.as_str()).unwrap_or("agent");
+                        let content_str =
+                            item.get("content").map(flatten_content).unwrap_or_default();
+
+                        if content_str.trim().is_empty() {
+                            continue;
+                        }
+
+                        let created = item.get("timestamp").and_then(parse_timestamp);
+                        update_time_bounds(&mut started_at, &mut ended_at, created);
+
+                        messages.push(NormalizedMessage {
+                            idx: 0,
+                            role: role.to_string(),
+                            author: None,
+                            created_at: created,
+                            content: content_str,
+                            extra: item.clone(),
+                            snippets: Vec::new(),
+                        });
+                    }
+                }
+                crate::types::reindex_messages(&mut messages);
+            }
+
+            if messages.is_empty() {
+                continue;
+            }
+
+            let title = messages
+                .iter()
+                .find(|m| m.role == "user")
+                .map(|m| {
+                    m.content
+                        .lines()
+                        .next()
+                        .unwrap_or(&m.content)
+                        .chars()
+                        .take(100)
+                        .collect::<String>()
+                })
+                .or_else(|| {
+                    messages
+                        .first()
+                        .and_then(|m| m.content.lines().next())
+                        .map(|s| s.chars().take(100).collect())
+                });
+
+            on_conversation(NormalizedConversation {
+                agent_slug: "codex".to_string(),
+                external_id,
+                title,
+                workspace: session_cwd,
+                source_path: source_path.clone(),
+                started_at,
+                ended_at,
+                metadata: serde_json::json!({"source": if ext == Some("json") { "rollout_json" } else { "rollout" }}),
+                messages,
+            })?;
+        }
+    }
+
+    Ok(())
+}
+
 impl Connector for CodexConnector {
     fn detect(&self) -> DetectionResult {
         franken_detection_for_connector("codex").unwrap_or_else(DetectionResult::not_found)
     }
 
     fn scan(&self, ctx: &ScanContext) -> Result<Vec<NormalizedConversation>> {
-        // Use data_root only if it IS a Codex home directory (for testing).
-        // Check for `.codex` in path OR explicit directory name ending in "codex".
-        // AND ensure it has a "sessions" subdirectory.
-        // This avoids false positives from unrelated directories that happen to have "codex" in the path.
-        let is_codex_dir = ctx
-            .data_dir
-            .to_str()
-            .map(|s| s.contains(".codex") || s.ends_with("/codex") || s.ends_with("\\codex"))
-            .unwrap_or(false)
-            && ctx.data_dir.join("sessions").exists();
-
-        let roots: Vec<PathBuf> = if ctx.use_default_detection() {
-            if is_codex_dir {
-                vec![ctx.data_dir.clone()]
-            } else {
-                vec![Self::home()]
-            }
-        } else {
-            // Explicit roots (remote mirrors, etc.)
-            ctx.scan_roots.iter().map(|r| r.path.clone()).collect()
-        };
-
-        if roots.is_empty() {
-            return Ok(Vec::new());
-        }
-
         let mut convs = Vec::new();
-
-        for mut home in roots {
-            if home.is_file() {
-                home = home.parent().unwrap_or(&home).to_path_buf();
-            }
-            if !home.exists() {
-                continue;
-            }
-
-            let files = Self::rollout_files(&home);
-
-            for file in files {
-                let source_path = file.clone();
-                // Skip files not modified since last scan (incremental indexing)
-                if !file_modified_since(&file, ctx.since_ts) {
-                    continue;
-                }
-                // Use relative path from sessions dir as external_id for uniqueness
-                // e.g., "2025/11/20/rollout-1" instead of just "rollout-1"
-                let sessions_dir = Self::sessions_dir(&home);
-                let external_id = source_path
-                    .strip_prefix(&sessions_dir)
-                    .ok()
-                    .and_then(|rel| {
-                        rel.with_extension("")
-                            .to_str()
-                            .map(std::string::ToString::to_string)
-                    })
-                    .or_else(|| {
-                        source_path
-                            .file_stem()
-                            .and_then(|s| s.to_str())
-                            .map(std::string::ToString::to_string)
-                    });
-                let ext = file.extension().and_then(|e| e.to_str());
-                let mut messages = Vec::new();
-                let mut started_at = None;
-                let mut ended_at = None;
-                let mut session_cwd: Option<PathBuf> = None;
-
-                if ext == Some("jsonl") {
-                    let f = std::fs::File::open(&file)
-                        .with_context(|| format!("open rollout {}", file.display()))?;
-                    let reader = std::io::BufReader::new(f);
-
-                    // Modern envelope format: each line has {type, timestamp, payload}
-                    for (line_idx, line_res) in std::io::BufRead::lines(reader).enumerate() {
-                        let line = match line_res {
-                            Ok(l) => l,
-                            Err(_) => continue,
-                        };
-                        if line.trim().is_empty() {
-                            continue;
-                        }
-                        let val: Value = match serde_json::from_str(&line) {
-                            Ok(v) => v,
-                            Err(_) => continue,
-                        };
-
-                        let entry_type = val.get("type").and_then(|v| v.as_str()).unwrap_or("");
-                        let created = val.get("timestamp").and_then(parse_timestamp);
-
-                        // NOTE: Do NOT filter individual messages by timestamp here!
-                        // The file-level check in file_modified_since() is sufficient.
-                        // Filtering messages would cause older messages to be lost when
-                        // the file is re-indexed after new messages are added.
-
-                        match entry_type {
-                            "session_meta" => {
-                                // Extract workspace from session metadata
-                                if let Some(payload) = val.get("payload") {
-                                    session_cwd = payload
-                                        .get("cwd")
-                                        .and_then(|v| v.as_str())
-                                        .map(PathBuf::from);
-                                }
-                                update_time_bounds(&mut started_at, &mut ended_at, created);
-                            }
-                            "response_item" => {
-                                // Main message entries with nested payload
-                                if let Some(payload) = val.get("payload") {
-                                    let role = payload
-                                        .get("role")
-                                        .and_then(|v| v.as_str())
-                                        .unwrap_or("agent");
-
-                                    let content_str = payload
-                                        .get("content")
-                                        .map(flatten_content)
-                                        .unwrap_or_default();
-
-                                    if content_str.trim().is_empty() {
-                                        continue;
-                                    }
-
-                                    update_time_bounds(&mut started_at, &mut ended_at, created);
-
-                                    messages.push(NormalizedMessage {
-                                        idx: 0, // will be re-assigned after filtering
-                                        role: role.to_string(),
-                                        author: None,
-                                        created_at: created,
-                                        content: content_str,
-                                        extra: val,
-                                        snippets: Vec::new(),
-                                    });
-                                }
-                            }
-                            "event_msg" => {
-                                // Event messages - filter by payload type
-                                if let Some(payload) = val.get("payload") {
-                                    let event_type = payload.get("type").and_then(|v| v.as_str());
-
-                                    match event_type {
-                                        Some("user_message") => {
-                                            let text = payload
-                                                .get("message")
-                                                .and_then(|v| v.as_str())
-                                                .unwrap_or("");
-                                            if !text.is_empty() {
-                                                update_time_bounds(
-                                                    &mut started_at,
-                                                    &mut ended_at,
-                                                    created,
-                                                );
-                                                messages.push(NormalizedMessage {
-                                                    idx: 0, // will be re-assigned after filtering
-                                                    role: "user".to_string(),
-                                                    author: None,
-                                                    created_at: created,
-                                                    content: text.to_string(),
-                                                    extra: val,
-                                                    snippets: Vec::new(),
-                                                });
-                                            }
-                                        }
-                                        Some("agent_reasoning") => {
-                                            // Include reasoning - valuable for search
-                                            let text = payload
-                                                .get("text")
-                                                .and_then(|v| v.as_str())
-                                                .unwrap_or("");
-                                            if !text.is_empty() {
-                                                update_time_bounds(
-                                                    &mut started_at,
-                                                    &mut ended_at,
-                                                    created,
-                                                );
-                                                messages.push(NormalizedMessage {
-                                                    idx: 0, // will be re-assigned after filtering
-                                                    role: "assistant".to_string(),
-                                                    author: Some("reasoning".to_string()),
-                                                    created_at: created,
-                                                    content: text.to_string(),
-                                                    extra: val,
-                                                    snippets: Vec::new(),
-                                                });
-                                            }
-                                        }
-                                        Some("token_count") => {
-                                            if let Some(token_usage) =
-                                                Self::token_usage_from_payload(payload)
-                                            {
-                                                Self::attach_token_usage_to_latest_assistant(
-                                                    &mut messages,
-                                                    token_usage,
-                                                    &source_path,
-                                                    line_idx + 1,
-                                                );
-                                            } else {
-                                                tracing::debug!(
-                                                    path = %source_path.display(),
-                                                    line_number = line_idx + 1,
-                                                    "codex token_count event missing token fields; skipping"
-                                                );
-                                            }
-                                        }
-                                        _ => {} // Skip turn_aborted and other unknown event types
-                                    }
-                                }
-                            }
-                            _ => {} // Skip turn_context and unknown types
-                        }
-                    }
-                    // Re-assign sequential indices after filtering
-                    crate::types::reindex_messages(&mut messages);
-                } else if ext == Some("json") {
-                    let content = fs::read_to_string(&file)
-                        .with_context(|| format!("read rollout {}", file.display()))?;
-                    // Legacy format: single JSON object with {session, items}
-                    let val: Value = match serde_json::from_str(&content) {
-                        Ok(v) => v,
-                        Err(_) => continue,
-                    };
-
-                    // Extract workspace from session.cwd
-                    session_cwd = val
-                        .get("session")
-                        .and_then(|s| s.get("cwd"))
-                        .and_then(|v| v.as_str())
-                        .map(PathBuf::from);
-
-                    // Parse items array
-                    if let Some(items) = val.get("items").and_then(|v| v.as_array()) {
-                        for item in items {
-                            let role = item.get("role").and_then(|v| v.as_str()).unwrap_or("agent");
-
-                            let content_str =
-                                item.get("content").map(flatten_content).unwrap_or_default();
-
-                            if content_str.trim().is_empty() {
-                                continue;
-                            }
-
-                            let created = item.get("timestamp").and_then(parse_timestamp);
-
-                            // NOTE: Do NOT filter individual messages by timestamp.
-                            // File-level check is sufficient for incremental indexing.
-
-                            update_time_bounds(&mut started_at, &mut ended_at, created);
-
-                            messages.push(NormalizedMessage {
-                                idx: 0, // will be re-assigned after filtering
-                                role: role.to_string(),
-                                author: None,
-                                created_at: created,
-                                content: content_str,
-                                extra: item.clone(),
-                                snippets: Vec::new(),
-                            });
-                        }
-                    }
-                    // Re-assign sequential indices after filtering
-                    crate::types::reindex_messages(&mut messages);
-                }
-
-                if messages.is_empty() {
-                    continue;
-                }
-
-                // Extract title from first user message
-                let title = messages
-                    .iter()
-                    .find(|m| m.role == "user")
-                    .map(|m| {
-                        m.content
-                            .lines()
-                            .next()
-                            .unwrap_or(&m.content)
-                            .chars()
-                            .take(100)
-                            .collect::<String>()
-                    })
-                    .or_else(|| {
-                        messages
-                            .first()
-                            .and_then(|m| m.content.lines().next())
-                            .map(|s| s.chars().take(100).collect())
-                    });
-
-                convs.push(NormalizedConversation {
-                    agent_slug: "codex".to_string(),
-                    external_id,
-                    title,
-                    workspace: session_cwd, // Now populated from session_meta/session.cwd!
-                    source_path: source_path.clone(),
-                    started_at,
-                    ended_at,
-                    metadata: serde_json::json!({"source": if ext == Some("json") { "rollout_json" } else { "rollout" }}),
-                    messages,
-                });
-            }
-        }
-
+        scan_codex_with_callback(ctx, &mut |conv| {
+            convs.push(conv);
+            Ok(())
+        })?;
         Ok(convs)
+    }
+
+    fn scan_with_callback(
+        &self,
+        ctx: &ScanContext,
+        on_conversation: &mut dyn FnMut(NormalizedConversation) -> Result<()>,
+    ) -> Result<()> {
+        scan_codex_with_callback(ctx, on_conversation)
     }
 }
 
@@ -615,6 +604,41 @@ mod tests {
         assert_eq!(convs[0].messages[0].role, "user");
         assert_eq!(convs[0].messages[0].content, "Hello Codex");
         assert_eq!(convs[0].messages[1].role, "assistant");
+    }
+
+    #[test]
+    fn scan_with_callback_matches_scan_for_jsonl_rollout() {
+        let dir = TempDir::new().unwrap();
+        let codex_dir = dir.path().join(".codex");
+        let sessions = codex_dir.join("sessions");
+        fs::create_dir_all(&sessions).unwrap();
+
+        let content = r#"{"type":"response_item","timestamp":"2025-12-01T10:00:00Z","payload":{"role":"user","content":"Hello Codex"}}
+{"type":"response_item","timestamp":"2025-12-01T10:00:01Z","payload":{"role":"assistant","content":"Hello! How can I help?"}}
+"#;
+        fs::write(sessions.join("rollout-stream.jsonl"), content).unwrap();
+
+        let connector = CodexConnector::new();
+        let ctx = ScanContext::local_default(codex_dir.clone(), None);
+        let scanned = connector.scan(&ctx).unwrap();
+        let mut streamed = Vec::new();
+        connector
+            .scan_with_callback(&ctx, &mut |conversation| {
+                streamed.push(conversation);
+                Ok(())
+            })
+            .unwrap();
+
+        assert_eq!(streamed.len(), scanned.len());
+        assert_eq!(streamed[0].messages.len(), scanned[0].messages.len());
+        assert_eq!(
+            streamed[0].messages[0].content,
+            scanned[0].messages[0].content
+        );
+        assert_eq!(
+            streamed[0].messages[1].content,
+            scanned[0].messages[1].content
+        );
     }
 
     #[test]

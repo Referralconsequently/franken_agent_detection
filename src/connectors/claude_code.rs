@@ -47,126 +47,183 @@ impl ClaudeCodeConnector {
     }
 }
 
-impl Connector for ClaudeCodeConnector {
-    fn detect(&self) -> DetectionResult {
-        franken_detection_for_connector("claude_code").unwrap_or_else(DetectionResult::not_found)
-    }
+fn scan_claude_with_callback(
+    ctx: &ScanContext,
+    on_conversation: &mut dyn FnMut(NormalizedConversation) -> Result<()>,
+) -> Result<()> {
+    let looks_like_root = |path: &PathBuf| path.join("projects").exists();
 
-    fn scan(&self, ctx: &ScanContext) -> Result<Vec<NormalizedConversation>> {
-        // Use data_root only if it looks like a Claude projects directory (for testing)
-        // Otherwise use the default projects_root
-        // Strict check: require 'projects' subdirectory to avoid shadowing when CASS
-        // data directory has "claude" in its name.
-        let looks_like_root = |path: &PathBuf| path.join("projects").exists();
-
-        let roots: Vec<PathBuf> = if ctx.use_default_detection() {
-            if looks_like_root(&ctx.data_dir) {
-                vec![ctx.data_dir.clone()]
-            } else {
-                vec![Self::projects_root()]
-            }
+    let roots: Vec<PathBuf> = if ctx.use_default_detection() {
+        if looks_like_root(&ctx.data_dir) {
+            vec![ctx.data_dir.clone()]
         } else {
-            // Explicit roots (remote mirrors, etc.) - trust the configuration
-            ctx.scan_roots.iter().map(|r| r.path.clone()).collect()
+            vec![ClaudeCodeConnector::projects_root()]
+        }
+    } else {
+        ctx.scan_roots.iter().map(|r| r.path.clone()).collect()
+    };
+
+    let mut file_count = 0;
+
+    for root in roots {
+        let scan_target = if root.is_file() {
+            root.parent().unwrap_or(&root).to_path_buf()
+        } else {
+            root.clone()
         };
 
-        let mut convs = Vec::new();
-        let mut file_count = 0;
+        if !scan_target.exists() {
+            continue;
+        }
 
-        for root in roots {
-            let scan_target = if root.is_file() {
-                root.parent().unwrap_or(&root).to_path_buf()
-            } else {
-                root.clone()
-            };
-
-            if !scan_target.exists() {
+        for path in ClaudeCodeConnector::session_files(&scan_target) {
+            let ext = path.extension().and_then(|s| s.to_str());
+            if !file_modified_since(&path, ctx.since_ts) {
                 continue;
             }
+            file_count += 1;
+            if file_count <= 3 {
+                tracing::debug!(path = %path.display(), "claude_code found file");
+            }
 
-            for path in Self::session_files(&scan_target) {
-                let ext = path.extension().and_then(|s| s.to_str());
-                // Skip files not modified since last scan (incremental indexing)
-                if !file_modified_since(&path, ctx.since_ts) {
+            let mut messages = Vec::new();
+            let mut started_at: Option<i64> = None;
+            let mut ended_at: Option<i64> = None;
+            let mut workspace: Option<PathBuf> = None;
+            let mut session_id: Option<String> = None;
+            let mut git_branch: Option<String> = None;
+            let mut json_title: Option<String> = None;
+
+            if ext == Some("jsonl") {
+                let file = std::fs::File::open(&path)
+                    .with_context(|| format!("open {}", path.display()))?;
+                let reader = std::io::BufReader::new(file);
+
+                for line_res in std::io::BufRead::lines(reader) {
+                    let line = match line_res {
+                        Ok(l) => l,
+                        Err(_) => continue,
+                    };
+                    if line.trim().is_empty() {
+                        continue;
+                    }
+                    let val: Value = match serde_json::from_str(&line) {
+                        Ok(v) => v,
+                        Err(_) => continue,
+                    };
+
+                    if workspace.is_none() {
+                        workspace = val.get("cwd").and_then(|v| v.as_str()).map(PathBuf::from);
+                    }
+                    if session_id.is_none() {
+                        session_id = val
+                            .get("sessionId")
+                            .and_then(|v| v.as_str())
+                            .map(String::from);
+                    }
+                    if git_branch.is_none() {
+                        git_branch = val
+                            .get("gitBranch")
+                            .and_then(|v| v.as_str())
+                            .map(String::from);
+                    }
+
+                    let entry_type = val.get("type").and_then(|v| v.as_str());
+                    let role_hint = val
+                        .get("message")
+                        .and_then(|m| m.get("role"))
+                        .and_then(|v| v.as_str())
+                        .or_else(|| val.get("role").and_then(|v| v.as_str()));
+                    let is_user_assistant = matches!(entry_type, Some("user" | "assistant"))
+                        || (entry_type == Some("message")
+                            && matches!(role_hint, Some("user" | "assistant")));
+                    if !is_user_assistant {
+                        continue;
+                    }
+
+                    let created = val.get("timestamp").and_then(parse_timestamp);
+
+                    started_at = match (started_at, created) {
+                        (Some(curr), Some(ts)) => Some(curr.min(ts)),
+                        (None, Some(ts)) => Some(ts),
+                        (other, None) => other,
+                    };
+                    ended_at = match (ended_at, created) {
+                        (Some(curr), Some(ts)) => Some(curr.max(ts)),
+                        (None, Some(ts)) => Some(ts),
+                        (Some(curr), None) => Some(curr),
+                        (None, None) => None,
+                    };
+
+                    let role = role_hint.or(entry_type).unwrap_or("agent");
+                    let content_val = val
+                        .get("message")
+                        .and_then(|m| m.get("content"))
+                        .or_else(|| val.get("content"));
+                    let content_str = content_val.map(flatten_content).unwrap_or_default();
+
+                    if content_str.trim().is_empty() {
+                        continue;
+                    }
+
+                    let author = val
+                        .get("message")
+                        .and_then(|m| m.get("model"))
+                        .and_then(|v| v.as_str())
+                        .map(String::from);
+
+                    messages.push(NormalizedMessage {
+                        idx: 0,
+                        role: role.to_string(),
+                        author,
+                        created_at: created,
+                        content: content_str,
+                        extra: val,
+                        snippets: Vec::new(),
+                    });
+                }
+                crate::types::reindex_messages(&mut messages);
+            } else {
+                if let Ok(metadata) = fs::metadata(&path)
+                    && metadata.len() > 100 * 1024 * 1024
+                {
+                    tracing::debug!(
+                        path = %path.display(),
+                        size_bytes = metadata.len(),
+                        "skipping large file (>100MB)"
+                    );
                     continue;
                 }
-                file_count += 1;
-                if file_count <= 3 {
-                    tracing::debug!(path = %path.display(), "claude_code found file");
-                }
 
-                let mut messages = Vec::new();
-                let mut started_at: Option<i64> = None;
-                let mut ended_at: Option<i64> = None;
-                // Track workspace from first entry's cwd field
-                let mut workspace: Option<PathBuf> = None;
-                let mut session_id: Option<String> = None;
-                let mut git_branch: Option<String> = None;
-                let mut json_title: Option<String> = None;
+                let content_string = fs::read_to_string(&path)
+                    .with_context(|| format!("read {}", path.display()))?;
+                let val: Value = match serde_json::from_str(&content_string) {
+                    Ok(v) => v,
+                    Err(e) => {
+                        tracing::debug!(path = %path.display(), error = %e, "claude_code skipping malformed JSON");
+                        continue;
+                    }
+                };
 
-                if ext == Some("jsonl") {
-                    let file = std::fs::File::open(&path)
-                        .with_context(|| format!("open {}", path.display()))?;
-                    let reader = std::io::BufReader::new(file);
+                json_title = val.get("title").and_then(|t| t.as_str()).map(String::from);
 
-                    for line_res in std::io::BufRead::lines(reader) {
-                        let line = match line_res {
-                            Ok(l) => l,
-                            Err(_) => continue,
-                        };
-                        if line.trim().is_empty() {
-                            continue;
-                        }
-                        let val: Value = match serde_json::from_str(&line) {
-                            Ok(v) => v,
-                            Err(_) => continue, // Skip malformed lines
-                        };
-
-                        // Extract session metadata from first available entry
-                        if workspace.is_none() {
-                            workspace = val.get("cwd").and_then(|v| v.as_str()).map(PathBuf::from);
-                        }
-                        if session_id.is_none() {
-                            session_id = val
-                                .get("sessionId")
-                                .and_then(|v| v.as_str())
-                                .map(String::from);
-                        }
-                        if git_branch.is_none() {
-                            git_branch = val
-                                .get("gitBranch")
-                                .and_then(|v| v.as_str())
-                                .map(String::from);
-                        }
-
-                        // Filter to user/assistant entries only (skip summary, file-history-snapshot, etc.)
-                        let entry_type = val.get("type").and_then(|v| v.as_str());
-                        let role_hint = val
-                            .get("message")
-                            .and_then(|m| m.get("role"))
+                if let Some(arr) = val.get("messages").and_then(|m| m.as_array()) {
+                    for item in arr {
+                        let role = item
+                            .get("role")
+                            .or_else(|| item.get("type"))
                             .and_then(|v| v.as_str())
-                            .or_else(|| val.get("role").and_then(|v| v.as_str()));
-                        let is_user_assistant = matches!(entry_type, Some("user" | "assistant"))
-                            || (entry_type == Some("message")
-                                && matches!(role_hint, Some("user" | "assistant")));
-                        if !is_user_assistant {
-                            continue;
-                        }
-
-                        // Parse ISO-8601 timestamp using shared utility
-                        let created = val.get("timestamp").and_then(parse_timestamp);
-
-                        // NOTE: Do NOT filter individual messages by timestamp here!
-                        // The file-level check in file_modified_since() is sufficient.
-                        // Filtering messages would cause older messages to be lost when
-                        // the file is re-indexed after new messages are added.
+                            .unwrap_or("agent");
+                        let created = item
+                            .get("timestamp")
+                            .or_else(|| item.get("time"))
+                            .and_then(parse_timestamp);
 
                         started_at = match (started_at, created) {
                             (Some(curr), Some(ts)) => Some(curr.min(ts)),
                             (None, Some(ts)) => Some(ts),
                             (other, None) => other,
                         };
-                        // Track the latest timestamp seen (robust against out-of-order logs)
                         ended_at = match (ended_at, created) {
                             (Some(curr), Some(ts)) => Some(curr.max(ts)),
                             (None, Some(ts)) => Some(ts),
@@ -174,177 +231,104 @@ impl Connector for ClaudeCodeConnector {
                             (None, None) => None,
                         };
 
-                        // Role from message.role, top-level role, or entry type
-                        let role = role_hint.or(entry_type).unwrap_or("agent");
+                        let content_str = item
+                            .get("content")
+                            .or_else(|| item.get("text"))
+                            .map(flatten_content)
+                            .unwrap_or_default();
 
-                        // Content from message.content or top-level content (may be string or array)
-                        let content_val = val
-                            .get("message")
-                            .and_then(|m| m.get("content"))
-                            .or_else(|| val.get("content"));
-                        let content_str = content_val.map(flatten_content).unwrap_or_default();
-
-                        // Skip entries with empty content
                         if content_str.trim().is_empty() {
                             continue;
                         }
 
-                        // Extract model name for author field
-                        let author = val
-                            .get("message")
-                            .and_then(|m| m.get("model"))
-                            .and_then(|v| v.as_str())
-                            .map(String::from);
-
                         messages.push(NormalizedMessage {
-                            idx: 0, // will be re-assigned after filtering
+                            idx: 0,
                             role: role.to_string(),
-                            author,
+                            author: None,
                             created_at: created,
                             content: content_str,
-                            extra: val,
+                            extra: item.clone(),
                             snippets: Vec::new(),
                         });
                     }
-                    // Re-assign sequential indices after filtering
-                    crate::types::reindex_messages(&mut messages);
-                } else {
-                    // Safety check: Don't read files larger than 100MB to avoid OOM
-                    if let Ok(metadata) = fs::metadata(&path)
-                        && metadata.len() > 100 * 1024 * 1024
-                    {
-                        tracing::debug!(
-                            path = %path.display(),
-                            size_bytes = metadata.len(),
-                            "skipping large file (>100MB)"
-                        );
-                        continue;
-                    }
-
-                    let content_string = fs::read_to_string(&path)
-                        .with_context(|| format!("read {}", path.display()))?;
-                    // JSON or Claude format files
-                    let val: Value = match serde_json::from_str(&content_string) {
-                        Ok(v) => v,
-                        Err(e) => {
-                            tracing::debug!(path = %path.display(), error = %e, "claude_code skipping malformed JSON");
-                            continue;
-                        }
-                    };
-
-                    // Extract title from root object if present
-                    json_title = val.get("title").and_then(|t| t.as_str()).map(String::from);
-
-                    if let Some(arr) = val.get("messages").and_then(|m| m.as_array()) {
-                        for item in arr {
-                            let role = item
-                                .get("role")
-                                .or_else(|| item.get("type"))
-                                .and_then(|v| v.as_str())
-                                .unwrap_or("agent");
-
-                            // Use parse_timestamp for consistent handling of both i64 and ISO-8601
-                            let created = item
-                                .get("timestamp")
-                                .or_else(|| item.get("time"))
-                                .and_then(parse_timestamp);
-
-                            // NOTE: Do NOT filter individual messages by timestamp.
-                            // File-level check is sufficient for incremental indexing.
-
-                            started_at = match (started_at, created) {
-                                (Some(curr), Some(ts)) => Some(curr.min(ts)),
-                                (None, Some(ts)) => Some(ts),
-                                (other, None) => other,
-                            };
-                            // Track the latest timestamp seen
-                            ended_at = match (ended_at, created) {
-                                (Some(curr), Some(ts)) => Some(curr.max(ts)),
-                                (None, Some(ts)) => Some(ts),
-                                (Some(curr), None) => Some(curr),
-                                (None, None) => None,
-                            };
-
-                            // Use flatten_content for consistent handling of both string and array content
-                            let content_str = item
-                                .get("content")
-                                .or_else(|| item.get("text"))
-                                .map(flatten_content)
-                                .unwrap_or_default();
-
-                            // Skip entries with empty content
-                            if content_str.trim().is_empty() {
-                                continue;
-                            }
-
-                            messages.push(NormalizedMessage {
-                                idx: 0, // will be re-assigned after filtering
-                                role: role.to_string(),
-                                author: None,
-                                created_at: created,
-                                content: content_str,
-                                extra: item.clone(),
-                                snippets: Vec::new(),
-                            });
-                        }
-                    }
-                    // Re-assign sequential indices after filtering
-                    crate::types::reindex_messages(&mut messages);
                 }
-                if messages.is_empty() {
-                    if file_count <= 3 {
-                        tracing::debug!(path = %path.display(), "claude_code no messages extracted");
-                    }
-                    continue;
-                }
-                tracing::debug!(path = %path.display(), messages = messages.len(), "claude_code extracted messages");
-
-                // Extract title: use explicit JSON title, or fallback to first user message
-                let title = json_title.or_else(|| {
-                    messages
-                        .iter()
-                        .find(|m| m.role == "user")
-                        .map(|m| {
-                            m.content
-                                .lines()
-                                .next()
-                                .unwrap_or(&m.content)
-                                .chars()
-                                .take(100)
-                                .collect::<String>()
-                        })
-                        .or_else(|| {
-                            // Fallback to workspace directory name
-                            workspace
-                                .as_ref()
-                                .and_then(|p| p.file_name())
-                                .and_then(|n| n.to_str())
-                                .map(String::from)
-                        })
-                });
-
-                convs.push(NormalizedConversation {
-                    agent_slug: "claude_code".into(),
-                    external_id: path
-                        .file_name()
-                        .and_then(|s| s.to_str())
-                        .map(std::string::ToString::to_string),
-                    title,
-                    workspace, // Now populated from cwd field!
-                    source_path: path.clone(),
-                    started_at,
-                    ended_at,
-                    metadata: serde_json::json!({
-                        "source": "claude_code",
-                        "sessionId": session_id,
-                        "gitBranch": git_branch
-                    }),
-                    messages,
-                });
+                crate::types::reindex_messages(&mut messages);
             }
-        }
 
+            if messages.is_empty() {
+                if file_count <= 3 {
+                    tracing::debug!(path = %path.display(), "claude_code no messages extracted");
+                }
+                continue;
+            }
+            tracing::debug!(path = %path.display(), messages = messages.len(), "claude_code extracted messages");
+
+            let title = json_title.or_else(|| {
+                messages
+                    .iter()
+                    .find(|m| m.role == "user")
+                    .map(|m| {
+                        m.content
+                            .lines()
+                            .next()
+                            .unwrap_or(&m.content)
+                            .chars()
+                            .take(100)
+                            .collect::<String>()
+                    })
+                    .or_else(|| {
+                        workspace
+                            .as_ref()
+                            .and_then(|p| p.file_name())
+                            .and_then(|n| n.to_str())
+                            .map(String::from)
+                    })
+            });
+
+            on_conversation(NormalizedConversation {
+                agent_slug: "claude_code".into(),
+                external_id: path
+                    .file_name()
+                    .and_then(|s| s.to_str())
+                    .map(std::string::ToString::to_string),
+                title,
+                workspace,
+                source_path: path.clone(),
+                started_at,
+                ended_at,
+                metadata: serde_json::json!({
+                    "source": "claude_code",
+                    "sessionId": session_id,
+                    "gitBranch": git_branch
+                }),
+                messages,
+            })?;
+        }
+    }
+
+    Ok(())
+}
+
+impl Connector for ClaudeCodeConnector {
+    fn detect(&self) -> DetectionResult {
+        franken_detection_for_connector("claude_code").unwrap_or_else(DetectionResult::not_found)
+    }
+
+    fn scan(&self, ctx: &ScanContext) -> Result<Vec<NormalizedConversation>> {
+        let mut convs = Vec::new();
+        scan_claude_with_callback(ctx, &mut |conv| {
+            convs.push(conv);
+            Ok(())
+        })?;
         Ok(convs)
+    }
+
+    fn scan_with_callback(
+        &self,
+        ctx: &ScanContext,
+        on_conversation: &mut dyn FnMut(NormalizedConversation) -> Result<()>,
+    ) -> Result<()> {
+        scan_claude_with_callback(ctx, on_conversation)
     }
 }
 
@@ -451,6 +435,40 @@ mod tests {
         assert_eq!(convs[0].messages[0].content, "Hello Claude");
         assert_eq!(convs[0].messages[1].role, "assistant");
         assert!(convs[0].messages[1].content.contains("How can I help"));
+    }
+
+    #[test]
+    fn scan_with_callback_matches_scan_for_jsonl_session() {
+        let dir = TempDir::new().unwrap();
+        let claude_dir = make_test_claude_dir(dir.path());
+
+        let session_file = claude_dir.join("session.jsonl");
+        let content = r#"{"type":"user","timestamp":"2025-12-01T10:00:00Z","message":{"role":"user","content":"Hello Claude"}}
+{"type":"assistant","timestamp":"2025-12-01T10:00:01Z","message":{"role":"assistant","content":"Hello! How can I help?"}}
+"#;
+        fs::write(&session_file, content).unwrap();
+
+        let connector = ClaudeCodeConnector::new();
+        let ctx = ScanContext::local_default(claude_dir.clone(), None);
+        let scanned = connector.scan(&ctx).unwrap();
+        let mut streamed = Vec::new();
+        connector
+            .scan_with_callback(&ctx, &mut |conversation| {
+                streamed.push(conversation);
+                Ok(())
+            })
+            .unwrap();
+
+        assert_eq!(streamed.len(), scanned.len());
+        assert_eq!(streamed[0].messages.len(), scanned[0].messages.len());
+        assert_eq!(
+            streamed[0].messages[0].content,
+            scanned[0].messages[0].content
+        );
+        assert_eq!(
+            streamed[0].messages[1].content,
+            scanned[0].messages[1].content
+        );
     }
 
     #[test]
