@@ -13,6 +13,9 @@ use super::{
 use crate::types::{DetectionResult, NormalizedConversation, NormalizedMessage};
 
 pub struct ClaudeCodeConnector;
+
+const LARGE_SESSION_EXTRA_COMPACT_THRESHOLD_BYTES: u64 = 32 * 1024 * 1024;
+
 impl Default for ClaudeCodeConnector {
     fn default() -> Self {
         Self::new()
@@ -44,6 +47,104 @@ impl ClaudeCodeConnector {
         // Keep connector traversal deterministic across filesystems/runs.
         files.sort();
         files
+    }
+
+    fn should_compact_large_message_extra(file_size_bytes: Option<u64>) -> bool {
+        file_size_bytes.is_some_and(|size| size >= LARGE_SESSION_EXTRA_COMPACT_THRESHOLD_BYTES)
+    }
+
+    fn compact_message_extra(raw: &Value) -> Value {
+        let mut cass = serde_json::Map::new();
+
+        if let Some(model) = raw
+            .pointer("/message/model")
+            .or_else(|| raw.get("model"))
+            .and_then(|v| v.as_str())
+            .filter(|value| !value.trim().is_empty())
+        {
+            cass.insert("model".to_string(), Value::String(model.to_string()));
+        }
+
+        let usage = raw.pointer("/message/usage");
+        let mut token_usage = serde_json::Map::new();
+        if let Some(input_tokens) = usage
+            .and_then(|value| value.get("input_tokens"))
+            .and_then(|value| value.as_i64())
+        {
+            token_usage.insert("input_tokens".to_string(), Value::from(input_tokens));
+        }
+        if let Some(output_tokens) = usage
+            .and_then(|value| value.get("output_tokens"))
+            .and_then(|value| value.as_i64())
+        {
+            token_usage.insert("output_tokens".to_string(), Value::from(output_tokens));
+        }
+        if let Some(cache_read_tokens) = usage
+            .and_then(|value| value.get("cache_read_input_tokens"))
+            .and_then(|value| value.as_i64())
+        {
+            token_usage.insert(
+                "cache_read_tokens".to_string(),
+                Value::from(cache_read_tokens),
+            );
+        }
+        if let Some(cache_creation_tokens) = usage
+            .and_then(|value| value.get("cache_creation_input_tokens"))
+            .and_then(|value| value.as_i64())
+        {
+            token_usage.insert(
+                "cache_creation_tokens".to_string(),
+                Value::from(cache_creation_tokens),
+            );
+        }
+        if let Some(service_tier) = usage
+            .and_then(|value| value.get("service_tier"))
+            .and_then(|value| value.as_str())
+            .filter(|value| !value.trim().is_empty())
+        {
+            token_usage.insert(
+                "service_tier".to_string(),
+                Value::String(service_tier.to_string()),
+            );
+        }
+        if !token_usage.is_empty() {
+            token_usage.insert("data_source".to_string(), Value::String("api".to_string()));
+            cass.insert("token_usage".to_string(), Value::Object(token_usage));
+        }
+
+        let tool_call_count = raw
+            .pointer("/message/content")
+            .and_then(|value| value.as_array())
+            .map(|items| {
+                items
+                    .iter()
+                    .filter(|item| {
+                        item.get("type").and_then(|kind| kind.as_str()) == Some("tool_use")
+                    })
+                    .count()
+            })
+            .unwrap_or(0);
+        if tool_call_count > 0 {
+            cass.insert("tool_call_count".to_string(), Value::from(tool_call_count));
+        }
+
+        if let Some(attachments) = raw
+            .get("attachment_refs")
+            .or_else(|| raw.get("attachments"))
+            .or_else(|| raw.pointer("/message/attachment_refs"))
+            .or_else(|| raw.pointer("/message/attachments"))
+            .cloned()
+        {
+            cass.insert("attachments".to_string(), attachments);
+        }
+
+        if cass.is_empty() {
+            Value::Object(serde_json::Map::new())
+        } else {
+            let mut out = serde_json::Map::new();
+            out.insert("cass".to_string(), Value::Object(cass));
+            Value::Object(out)
+        }
     }
 }
 
@@ -80,6 +181,16 @@ fn scan_claude_with_callback(
             let ext = path.extension().and_then(|s| s.to_str());
             if !file_modified_since(&path, ctx.since_ts) {
                 continue;
+            }
+            let file_size_bytes = fs::metadata(&path).ok().map(|metadata| metadata.len());
+            let compact_message_extra =
+                ClaudeCodeConnector::should_compact_large_message_extra(file_size_bytes);
+            if compact_message_extra {
+                tracing::debug!(
+                    path = %path.display(),
+                    size_bytes = file_size_bytes.unwrap_or_default(),
+                    "claude_code compacting per-message extra payloads for large session"
+                );
             }
             file_count += 1;
             if file_count <= 3 {
@@ -178,7 +289,11 @@ fn scan_claude_with_callback(
                         author,
                         created_at: created,
                         content: content_str,
-                        extra: val,
+                        extra: if compact_message_extra {
+                            ClaudeCodeConnector::compact_message_extra(&val)
+                        } else {
+                            val
+                        },
                         snippets: Vec::new(),
                     });
                 }
@@ -247,7 +362,11 @@ fn scan_claude_with_callback(
                             author: None,
                             created_at: created,
                             content: content_str,
-                            extra: item.clone(),
+                            extra: if compact_message_extra {
+                                ClaudeCodeConnector::compact_message_extra(item)
+                            } else {
+                                item.clone()
+                            },
                             snippets: Vec::new(),
                         });
                     }
@@ -473,6 +592,51 @@ mod tests {
             streamed[0].messages[1].content,
             scanned[0].messages[1].content
         );
+    }
+
+    #[test]
+    fn compact_message_extra_keeps_only_compact_cass_metadata() {
+        let raw = json!({
+            "message": {
+                "model": "claude-opus-4-6",
+                "usage": {
+                    "input_tokens": 100,
+                    "output_tokens": 50,
+                    "cache_read_input_tokens": 20,
+                    "cache_creation_input_tokens": 5,
+                    "service_tier": "standard"
+                },
+                "content": [
+                    {"type": "tool_use", "name": "Read"},
+                    {"type": "tool_use", "name": "Edit"},
+                    {"type": "text", "text": "large duplicated content"}
+                ]
+            },
+            "attachments": [{"path": "/tmp/log.txt"}],
+            "summary": "this should be dropped"
+        });
+
+        let compact = ClaudeCodeConnector::compact_message_extra(&raw);
+        assert_eq!(compact["cass"]["model"], "claude-opus-4-6");
+        assert_eq!(compact["cass"]["token_usage"]["input_tokens"], 100);
+        assert_eq!(compact["cass"]["token_usage"]["output_tokens"], 50);
+        assert_eq!(compact["cass"]["token_usage"]["cache_read_tokens"], 20);
+        assert_eq!(compact["cass"]["token_usage"]["cache_creation_tokens"], 5);
+        assert_eq!(compact["cass"]["token_usage"]["service_tier"], "standard");
+        assert_eq!(compact["cass"]["tool_call_count"], 2);
+        assert_eq!(compact["cass"]["attachments"][0]["path"], "/tmp/log.txt");
+        assert!(compact.get("summary").is_none());
+    }
+
+    #[test]
+    fn should_compact_large_message_extra_respects_threshold() {
+        assert!(!ClaudeCodeConnector::should_compact_large_message_extra(Some(
+            LARGE_SESSION_EXTRA_COMPACT_THRESHOLD_BYTES - 1,
+        )));
+        assert!(ClaudeCodeConnector::should_compact_large_message_extra(Some(
+            LARGE_SESSION_EXTRA_COMPACT_THRESHOLD_BYTES,
+        )));
+        assert!(!ClaudeCodeConnector::should_compact_large_message_extra(None));
     }
 
     #[test]

@@ -144,15 +144,22 @@ pub fn normalize_model(raw: &str) -> ModelInfo {
 #[must_use]
 pub fn extract_claude_code_tokens(extra: &Value) -> ExtractedTokenUsage {
     let model_name = extra
-        .pointer("/message/model")
+        .pointer("/cass/model")
         .and_then(|v| v.as_str())
-        .map(String::from);
+        .map(String::from)
+        .or_else(|| {
+            extra
+                .pointer("/message/model")
+                .and_then(|v| v.as_str())
+                .map(String::from)
+        });
 
     let provider = model_name
         .as_deref()
         .map(|name| normalize_model(name).provider);
 
-    let usage_block = extra.pointer("/message/usage");
+    let compact_usage = extra.pointer("/cass/token_usage");
+    let usage_block = compact_usage.or_else(|| extra.pointer("/message/usage"));
     let input_tokens = usage_block
         .and_then(|u| u.get("input_tokens"))
         .and_then(|v| v.as_i64());
@@ -160,10 +167,16 @@ pub fn extract_claude_code_tokens(extra: &Value) -> ExtractedTokenUsage {
         .and_then(|u| u.get("output_tokens"))
         .and_then(|v| v.as_i64());
     let cache_read_tokens = usage_block
-        .and_then(|u| u.get("cache_read_input_tokens"))
+        .and_then(|u| {
+            u.get("cache_read_tokens")
+                .or_else(|| u.get("cache_read_input_tokens"))
+        })
         .and_then(|v| v.as_i64());
     let cache_creation_tokens = usage_block
-        .and_then(|u| u.get("cache_creation_input_tokens"))
+        .and_then(|u| {
+            u.get("cache_creation_tokens")
+                .or_else(|| u.get("cache_creation_input_tokens"))
+        })
         .and_then(|v| v.as_i64());
     let service_tier = usage_block
         .and_then(|u| u.get("service_tier"))
@@ -173,18 +186,27 @@ pub fn extract_claude_code_tokens(extra: &Value) -> ExtractedTokenUsage {
     let has_api_data = input_tokens.is_some()
         || output_tokens.is_some()
         || cache_read_tokens.is_some()
-        || cache_creation_tokens.is_some();
+        || cache_creation_tokens.is_some()
+        || compact_usage
+            .and_then(|usage| usage.get("data_source"))
+            .and_then(|value| value.as_str())
+            == Some("api");
 
-    let (has_tool_calls, tool_call_count) =
-        if let Some(content_arr) = extra.pointer("/message/content").and_then(|v| v.as_array()) {
-            let count = content_arr
-                .iter()
-                .filter(|item| item.get("type").and_then(|t| t.as_str()) == Some("tool_use"))
-                .count() as u32;
-            (count > 0, count)
-        } else {
-            (false, 0)
-        };
+    let compact_tool_call_count = extra
+        .pointer("/cass/tool_call_count")
+        .and_then(|v| v.as_u64())
+        .map(|count| count as u32);
+    let (has_tool_calls, tool_call_count) = if let Some(count) = compact_tool_call_count {
+        (count > 0, count)
+    } else if let Some(content_arr) = extra.pointer("/message/content").and_then(|v| v.as_array()) {
+        let count = content_arr
+            .iter()
+            .filter(|item| item.get("type").and_then(|t| t.as_str()) == Some("tool_use"))
+            .count() as u32;
+        (count > 0, count)
+    } else {
+        (false, 0)
+    };
 
     ExtractedTokenUsage {
         model_name,
@@ -241,6 +263,7 @@ pub fn extract_codex_tokens(extra: &Value) -> ExtractedTokenUsage {
 
     let model_name = extra
         .get("model")
+        .or_else(|| extra.pointer("/cass/model"))
         .or_else(|| extra.pointer("/response/model"))
         .and_then(|v| v.as_str())
         .map(String::from);
@@ -293,6 +316,7 @@ pub fn extract_tokens_for_agent(
         "cursor" | "pi_agent" | "factory" | "opencode" | "gemini" => {
             let model_name = extra
                 .get("model")
+                .or_else(|| extra.pointer("/cass/model"))
                 .or_else(|| extra.pointer("/message/model"))
                 .or_else(|| extra.pointer("/modelConfig/modelName"))
                 .or_else(|| extra.get("modelType"))
@@ -456,6 +480,57 @@ mod tests {
         let usage = extract_codex_tokens(&raw);
         assert_eq!(usage.input_tokens, Some(10));
         assert_eq!(usage.output_tokens, Some(20));
+        assert_eq!(usage.data_source, TokenDataSource::Api);
+    }
+
+    #[test]
+    fn extract_claude_code_tokens_from_compact_cass_payload() {
+        let raw: Value = serde_json::json!({
+            "cass": {
+                "model": "claude-opus-4-6",
+                "tool_call_count": 2,
+                "token_usage": {
+                    "input_tokens": 100,
+                    "output_tokens": 500,
+                    "cache_read_tokens": 20000,
+                    "cache_creation_tokens": 5000,
+                    "service_tier": "standard",
+                    "data_source": "api"
+                }
+            }
+        });
+
+        let usage = extract_claude_code_tokens(&raw);
+        assert_eq!(usage.model_name.as_deref(), Some("claude-opus-4-6"));
+        assert_eq!(usage.provider.as_deref(), Some("anthropic"));
+        assert_eq!(usage.input_tokens, Some(100));
+        assert_eq!(usage.output_tokens, Some(500));
+        assert_eq!(usage.cache_read_tokens, Some(20000));
+        assert_eq!(usage.cache_creation_tokens, Some(5000));
+        assert_eq!(usage.service_tier.as_deref(), Some("standard"));
+        assert_eq!(usage.data_source, TokenDataSource::Api);
+        assert!(usage.has_tool_calls);
+        assert_eq!(usage.tool_call_count, 2);
+    }
+
+    #[test]
+    fn extract_codex_tokens_model_from_compact_cass_payload() {
+        let raw: Value = serde_json::json!({
+            "cass": {
+                "model": "gpt-5-codex",
+                "token_usage": {
+                    "input_tokens": 11,
+                    "output_tokens": 22,
+                    "data_source": "api"
+                }
+            }
+        });
+
+        let usage = extract_codex_tokens(&raw);
+        assert_eq!(usage.model_name.as_deref(), Some("gpt-5-codex"));
+        assert_eq!(usage.provider.as_deref(), Some("openai"));
+        assert_eq!(usage.input_tokens, Some(11));
+        assert_eq!(usage.output_tokens, Some(22));
         assert_eq!(usage.data_source, TokenDataSource::Api);
     }
 

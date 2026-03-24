@@ -147,6 +147,9 @@ fn extract_path_from_position(content: &str, start: usize) -> Option<PathBuf> {
 }
 
 pub struct GeminiConnector;
+
+const LARGE_SESSION_EXTRA_COMPACT_THRESHOLD_BYTES: u64 = 32 * 1024 * 1024;
+
 impl Default for GeminiConnector {
     fn default() -> Self {
         Self::new()
@@ -192,6 +195,36 @@ impl GeminiConnector {
         files.sort();
         files
     }
+
+    fn should_compact_large_message_extra(file_size_bytes: Option<u64>) -> bool {
+        file_size_bytes.is_some_and(|size| size >= LARGE_SESSION_EXTRA_COMPACT_THRESHOLD_BYTES)
+    }
+
+    fn compact_message_extra(raw: &Value) -> Value {
+        let mut out = serde_json::Map::new();
+
+        if let Some(model) = raw
+            .get("model")
+            .or_else(|| raw.pointer("/message/model"))
+            .or_else(|| raw.pointer("/modelConfig/modelName"))
+            .or_else(|| raw.get("modelType"))
+            .or_else(|| raw.get("modelID"))
+            .and_then(|value| value.as_str())
+            .filter(|value| !value.trim().is_empty())
+        {
+            out.insert("model".to_string(), Value::String(model.to_string()));
+        }
+
+        if let Some(attachments) = raw
+            .get("attachment_refs")
+            .or_else(|| raw.get("attachments"))
+            .cloned()
+        {
+            out.insert("attachments".to_string(), attachments);
+        }
+
+        Value::Object(out)
+    }
 }
 
 fn scan_gemini_with_callback(
@@ -231,16 +264,26 @@ fn scan_gemini_with_callback(
         if !file_modified_since(&file, ctx.since_ts) {
             continue;
         }
+        let file_size_bytes = fs::metadata(&file).ok().map(|metadata| metadata.len());
+        let compact_message_extra =
+            GeminiConnector::should_compact_large_message_extra(file_size_bytes);
+        if compact_message_extra {
+            tracing::debug!(
+                path = %file.display(),
+                size_bytes = file_size_bytes.unwrap_or_default(),
+                "gemini compacting per-message extra payloads for large session"
+            );
+        }
 
-        let content = match fs::read_to_string(&file) {
-            Ok(c) => c,
+        let file_handle = match std::fs::File::open(&file) {
+            Ok(handle) => handle,
             Err(e) => {
-                tracing::warn!("failed to read session {}: {}", file.display(), e);
+                tracing::warn!("failed to open session {}: {}", file.display(), e);
                 continue;
             }
         };
-
-        let val: Value = match serde_json::from_str(&content) {
+        let reader = std::io::BufReader::new(file_handle);
+        let mut val: Value = match serde_json::from_reader(reader) {
             Ok(v) => v,
             Err(e) => {
                 tracing::warn!("failed to parse session {}: {}", file.display(), e);
@@ -263,7 +306,13 @@ fn scan_gemini_with_callback(
         let last_updated = val.get("lastUpdated").and_then(parse_timestamp);
 
         // Parse messages array
-        let Some(messages_arr) = val.get("messages").and_then(|m| m.as_array()) else {
+        let Some(messages_value) = val
+            .as_object_mut()
+            .and_then(|object| object.remove("messages"))
+        else {
+            continue;
+        };
+        let Value::Array(messages_arr) = messages_value else {
             continue;
         };
 
@@ -314,7 +363,11 @@ fn scan_gemini_with_callback(
                 author: None,
                 created_at: created,
                 content: content_str,
-                extra: item.clone(),
+                extra: if compact_message_extra {
+                    GeminiConnector::compact_message_extra(&item)
+                } else {
+                    item
+                },
                 snippets: Vec::new(),
             });
         }
@@ -684,6 +737,31 @@ mod tests {
             })
             .collect();
         assert_eq!(names, vec!["session-a.json", "session-z.json"]);
+    }
+
+    #[test]
+    fn compact_message_extra_keeps_only_model_and_attachments() {
+        let raw = serde_json::json!({
+            "modelConfig": {"modelName": "gemini-2.5-pro"},
+            "attachments": [{"uri": "gs://bucket/image.png"}],
+            "parts": [{"text": "very large duplicated content"}]
+        });
+
+        let compact = GeminiConnector::compact_message_extra(&raw);
+        assert_eq!(compact["model"], "gemini-2.5-pro");
+        assert_eq!(compact["attachments"][0]["uri"], "gs://bucket/image.png");
+        assert!(compact.get("parts").is_none());
+    }
+
+    #[test]
+    fn should_compact_large_message_extra_respects_threshold() {
+        assert!(!GeminiConnector::should_compact_large_message_extra(Some(
+            LARGE_SESSION_EXTRA_COMPACT_THRESHOLD_BYTES - 1,
+        )));
+        assert!(GeminiConnector::should_compact_large_message_extra(Some(
+            LARGE_SESSION_EXTRA_COMPACT_THRESHOLD_BYTES,
+        )));
+        assert!(!GeminiConnector::should_compact_large_message_extra(None));
     }
 
     #[test]

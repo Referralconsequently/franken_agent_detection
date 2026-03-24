@@ -13,6 +13,9 @@ use super::{
 use crate::types::{DetectionResult, NormalizedConversation, NormalizedMessage};
 
 pub struct CodexConnector;
+
+const LARGE_SESSION_EXTRA_COMPACT_THRESHOLD_BYTES: u64 = 32 * 1024 * 1024;
+
 impl Default for CodexConnector {
     fn default() -> Self {
         Self::new()
@@ -89,6 +92,39 @@ impl CodexConnector {
         usage.insert("data_source".to_string(), Value::String("api".to_string()));
 
         Some(Value::Object(usage))
+    }
+
+    fn should_compact_large_message_extra(file_size_bytes: Option<u64>) -> bool {
+        file_size_bytes.is_some_and(|size| size >= LARGE_SESSION_EXTRA_COMPACT_THRESHOLD_BYTES)
+    }
+
+    fn compact_message_extra(raw: &Value) -> Value {
+        let mut cass = serde_json::Map::new();
+
+        if let Some(model) = raw
+            .get("model")
+            .or_else(|| raw.pointer("/response/model"))
+            .and_then(|v| v.as_str())
+            .filter(|value| !value.trim().is_empty())
+        {
+            cass.insert("model".to_string(), Value::String(model.to_string()));
+        }
+
+        if let Some(attachments) = raw
+            .get("attachment_refs")
+            .or_else(|| raw.get("attachments"))
+            .cloned()
+        {
+            cass.insert("attachments".to_string(), attachments);
+        }
+
+        if cass.is_empty() {
+            Value::Object(serde_json::Map::new())
+        } else {
+            let mut out = serde_json::Map::new();
+            out.insert("cass".to_string(), Value::Object(cass));
+            Value::Object(out)
+        }
     }
 
     fn attach_token_usage_to_latest_assistant(
@@ -178,6 +214,16 @@ fn scan_codex_with_callback(
             if !file_modified_since(&file, ctx.since_ts) {
                 continue;
             }
+            let file_size_bytes = fs::metadata(&file).ok().map(|metadata| metadata.len());
+            let compact_message_extra =
+                CodexConnector::should_compact_large_message_extra(file_size_bytes);
+            if compact_message_extra {
+                tracing::debug!(
+                    path = %file.display(),
+                    size_bytes = file_size_bytes.unwrap_or_default(),
+                    "codex compacting per-message extra payloads for large session"
+                );
+            }
             let sessions_dir = CodexConnector::sessions_dir(&home);
             let external_id = source_path
                 .strip_prefix(&sessions_dir)
@@ -254,7 +300,11 @@ fn scan_codex_with_callback(
                                     author: None,
                                     created_at: created,
                                     content: content_str,
-                                    extra: val,
+                                    extra: if compact_message_extra {
+                                        CodexConnector::compact_message_extra(&val)
+                                    } else {
+                                        val
+                                    },
                                     snippets: Vec::new(),
                                 });
                             }
@@ -281,7 +331,11 @@ fn scan_codex_with_callback(
                                                 author: None,
                                                 created_at: created,
                                                 content: text.to_string(),
-                                                extra: val,
+                                                extra: if compact_message_extra {
+                                                    CodexConnector::compact_message_extra(&val)
+                                                } else {
+                                                    val
+                                                },
                                                 snippets: Vec::new(),
                                             });
                                         }
@@ -303,7 +357,11 @@ fn scan_codex_with_callback(
                                                 author: Some("reasoning".to_string()),
                                                 created_at: created,
                                                 content: text.to_string(),
-                                                extra: val,
+                                                extra: if compact_message_extra {
+                                                    CodexConnector::compact_message_extra(&val)
+                                                } else {
+                                                    val
+                                                },
                                                 snippets: Vec::new(),
                                             });
                                         }
@@ -367,7 +425,11 @@ fn scan_codex_with_callback(
                             author: None,
                             created_at: created,
                             content: content_str,
-                            extra: item.clone(),
+                            extra: if compact_message_extra {
+                                CodexConnector::compact_message_extra(item)
+                            } else {
+                                item.clone()
+                            },
                             snippets: Vec::new(),
                         });
                     }
@@ -643,6 +705,33 @@ mod tests {
             streamed[0].messages[1].content,
             scanned[0].messages[1].content
         );
+    }
+
+    #[test]
+    fn compact_message_extra_keeps_only_cass_metadata() {
+        let raw = json!({
+            "model": "gpt-5-codex",
+            "attachments": [{"path": "/tmp/screenshot.png"}],
+            "payload": {
+                "content": "very large duplicated content"
+            }
+        });
+
+        let compact = CodexConnector::compact_message_extra(&raw);
+        assert_eq!(compact["cass"]["model"], "gpt-5-codex");
+        assert_eq!(compact["cass"]["attachments"][0]["path"], "/tmp/screenshot.png");
+        assert!(compact.get("payload").is_none());
+    }
+
+    #[test]
+    fn should_compact_large_message_extra_respects_threshold() {
+        assert!(!CodexConnector::should_compact_large_message_extra(Some(
+            LARGE_SESSION_EXTRA_COMPACT_THRESHOLD_BYTES - 1,
+        )));
+        assert!(CodexConnector::should_compact_large_message_extra(Some(
+            LARGE_SESSION_EXTRA_COMPACT_THRESHOLD_BYTES,
+        )));
+        assert!(!CodexConnector::should_compact_large_message_extra(None));
     }
 
     #[test]
