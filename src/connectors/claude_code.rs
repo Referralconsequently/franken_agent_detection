@@ -407,9 +407,15 @@ fn scan_claude_with_callback(
             on_conversation(NormalizedConversation {
                 agent_slug: "claude_code".into(),
                 external_id: path
-                    .file_name()
-                    .and_then(|s| s.to_str())
-                    .map(std::string::ToString::to_string),
+                    .strip_prefix(&scan_target)
+                    .ok()
+                    .and_then(|rel| rel.to_str())
+                    .map(std::string::ToString::to_string)
+                    .or_else(|| {
+                        path.file_name()
+                            .and_then(|s| s.to_str())
+                            .map(std::string::ToString::to_string)
+                    }),
                 title,
                 workspace,
                 source_path: path.clone(),
@@ -1130,7 +1136,7 @@ mod tests {
     }
 
     #[test]
-    fn scan_sets_external_id_from_filename() {
+    fn scan_sets_external_id_from_relative_path() {
         let dir = TempDir::new().unwrap();
         let claude_dir = make_test_claude_dir(dir.path());
 
@@ -1145,6 +1151,39 @@ mod tests {
         assert_eq!(
             convs[0].external_id,
             Some("unique-session-id.jsonl".to_string())
+        );
+    }
+
+    #[test]
+    fn scan_external_id_includes_subdir_for_subagent_files() {
+        let dir = TempDir::new().unwrap();
+        let claude_dir = make_test_claude_dir(dir.path());
+
+        // Simulate subagent files under different parent sessions sharing the
+        // same basename (e.g. agent-a297e09.jsonl).
+        let sub_a = claude_dir.join("parent-session-aaa");
+        let sub_b = claude_dir.join("parent-session-bbb");
+        fs::create_dir_all(&sub_a).unwrap();
+        fs::create_dir_all(&sub_b).unwrap();
+
+        let content = r#"{"type":"user","message":{"role":"user","content":"Test"}}"#;
+        fs::write(sub_a.join("agent-a297e09.jsonl"), content).unwrap();
+        fs::write(sub_b.join("agent-a297e09.jsonl"), content).unwrap();
+
+        let connector = ClaudeCodeConnector::new();
+        let ctx = ScanContext::local_default(claude_dir.clone(), None);
+        let mut convs = connector.scan(&ctx).unwrap();
+
+        assert_eq!(convs.len(), 2);
+        convs.sort_by(|a, b| a.external_id.cmp(&b.external_id));
+
+        assert_eq!(
+            convs[0].external_id,
+            Some("parent-session-aaa/agent-a297e09.jsonl".to_string())
+        );
+        assert_eq!(
+            convs[1].external_id,
+            Some("parent-session-bbb/agent-a297e09.jsonl".to_string())
         );
     }
 
