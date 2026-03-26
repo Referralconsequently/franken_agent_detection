@@ -285,16 +285,16 @@ fn default_probe_roots(slug: &str) -> Vec<PathBuf> {
             push(&[".continue", "sessions"]);
             push(&[".continue"]);
         }
-        "crush" => {
-            push(&[".crush"]);
-            push(&[".crush", "crush.db"]);
-        }
         "copilot_cli" => {
             push(&[".copilot", "session-state"]);
             push(&[".copilot", "history-session-state"]);
             push(&[".config", "gh-copilot"]);
             push(&[".config", "gh", "copilot"]);
             push(&[".local", "share", "github-copilot"]);
+        }
+        "crush" => {
+            push(&[".crush"]);
+            push(&[".crush", "crush.db"]);
         }
         "cursor" => {
             push(&[".cursor"]);
@@ -522,7 +522,6 @@ pub fn default_probe_paths_tilde() -> Vec<(&'static str, Vec<String>)> {
                 ],
                 "codex" => vec![tilde(&[".codex", "sessions"])],
                 "continue" => vec![tilde(&[".continue", "sessions"])],
-                "crush" => vec![tilde(&[".crush", "crush.db"]), tilde(&[".crush"])],
                 "copilot_cli" => vec![
                     tilde(&[".copilot", "session-state"]),
                     tilde(&[".copilot", "history-session-state"]),
@@ -530,6 +529,7 @@ pub fn default_probe_paths_tilde() -> Vec<(&'static str, Vec<String>)> {
                     tilde(&[".config", "gh", "copilot"]),
                     tilde(&[".local", "share", "github-copilot"]),
                 ],
+                "crush" => vec![tilde(&[".crush", "crush.db"]), tilde(&[".crush"])],
                 "cursor" => vec![tilde(&[".cursor"])],
                 "factory" => vec![tilde(&[".factory", "sessions"])],
                 "gemini" => vec![tilde(&[".gemini", "tmp"]), tilde(&[".gemini"])],
