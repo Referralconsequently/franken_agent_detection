@@ -33,6 +33,8 @@ pub use types::{
 // Re-export connector infrastructure at crate root.
 #[cfg(feature = "chatgpt")]
 pub use connectors::chatgpt::ChatGptConnector;
+#[cfg(feature = "crush")]
+pub use connectors::crush::CrushConnector;
 #[cfg(feature = "cursor")]
 pub use connectors::cursor::CursorConnector;
 #[cfg(feature = "opencode")]
@@ -118,6 +120,7 @@ const KNOWN_CONNECTORS: &[&str] = &[
     "codex",
     "continue",
     "copilot_cli",
+    "crush",
     "cursor",
     "factory",
     "gemini",
@@ -143,6 +146,7 @@ fn canonical_connector_slug(slug: &str) -> Option<&'static str> {
         "codex" | "codex-cli" => Some("codex"),
         "continue" | "continue-dev" => Some("continue"),
         "copilot_cli" | "copilot-cli" | "gh-copilot" => Some("copilot_cli"),
+        "crush" | "charm-crush" => Some("crush"),
         "cursor" => Some("cursor"),
         "factory" | "factory-droid" => Some("factory"),
         "gemini" | "gemini-cli" => Some("gemini"),
@@ -280,6 +284,10 @@ fn default_probe_roots(slug: &str) -> Vec<PathBuf> {
         "continue" => {
             push(&[".continue", "sessions"]);
             push(&[".continue"]);
+        }
+        "crush" => {
+            push(&[".crush"]);
+            push(&[".crush", "crush.db"]);
         }
         "copilot_cli" => {
             push(&[".copilot", "session-state"]);
@@ -514,6 +522,7 @@ pub fn default_probe_paths_tilde() -> Vec<(&'static str, Vec<String>)> {
                 ],
                 "codex" => vec![tilde(&[".codex", "sessions"])],
                 "continue" => vec![tilde(&[".continue", "sessions"])],
+                "crush" => vec![tilde(&[".crush", "crush.db"]), tilde(&[".crush"])],
                 "copilot_cli" => vec![
                     tilde(&[".copilot", "session-state"]),
                     tilde(&[".copilot", "history-session-state"]),

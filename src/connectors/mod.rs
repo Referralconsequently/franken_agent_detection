@@ -12,6 +12,8 @@ pub mod cline;
 pub mod codex;
 pub mod copilot;
 pub mod copilot_cli;
+#[cfg(feature = "crush")]
+pub mod crush;
 #[cfg(feature = "cursor")]
 pub mod cursor;
 pub mod factory;
@@ -170,5 +172,7 @@ pub fn get_connector_factories() -> Vec<(&'static str, fn() -> Box<dyn Connector
     v.push(("chatgpt", || Box::new(chatgpt::ChatGptConnector::new())));
     #[cfg(feature = "cursor")]
     v.push(("cursor", || Box::new(cursor::CursorConnector::new())));
+    #[cfg(feature = "crush")]
+    v.push(("crush", || Box::new(crush::CrushConnector::new())));
     v
 }
