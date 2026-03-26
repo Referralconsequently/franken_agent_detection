@@ -10,12 +10,14 @@
 //!
 //! The `parts` column contains a JSON array of objects with `type` and `text` fields;
 //! text content is extracted from entries where `type == "text"`.
+//!
+//! **NOTE:** This connector uses `frankensqlite` — NOT rusqlite. See AGENTS.md RULE 2.
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
-use rusqlite::Connection;
+use frankensqlite::compat::{ConnectionExt, OpenFlags, ParamValue, RowExt, open_with_flags};
 use serde::Deserialize;
 
 use super::scan::ScanContext;
@@ -64,39 +66,37 @@ impl CrushConnector {
         dbs
     }
 
-    /// Extract sessions from a Crush `SQLite` database.
+    /// Extract sessions from a Crush `SQLite` database using frankensqlite.
     fn extract_from_sqlite(
         db_path: &Path,
         since_ts: Option<i64>,
     ) -> Result<Vec<NormalizedConversation>> {
-        let conn = Connection::open_with_flags(
-            db_path,
-            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
+        let conn = open_with_flags(
+            db_path.to_string_lossy().as_ref(),
+            OpenFlags::SQLITE_OPEN_READ_ONLY,
         )
         .with_context(|| format!("failed to open Crush db: {}", db_path.display()))?;
 
-        conn.busy_timeout(std::time::Duration::from_secs(5))?;
+        conn.execute("PRAGMA busy_timeout = 5000;")
+            .with_context(|| "failed to set busy_timeout")?;
 
         let (query, params) = Self::build_query(since_ts);
-        let mut stmt = conn.prepare(&query)?;
-
-        let param_refs: Vec<&dyn rusqlite::types::ToSql> = params.iter().map(|p| &**p).collect();
-        let rows = stmt.query_map(param_refs.as_slice(), |row| {
+        let rows: Vec<CrushRow> = conn.query_map_collect(&query, &params, |row| {
             Ok(CrushRow {
-                session_id: row.get(0)?,
-                title: row.get(1)?,
-                prompt_tokens: row.get(2)?,
-                completion_tokens: row.get(3)?,
-                cost: row.get(4)?,
-                role: row.get(5)?,
-                parts_json: row.get(6)?,
-                created_at: row.get(7)?,
-                model: row.get(8)?,
-                provider: row.get(9)?,
+                session_id: row.get_typed(0)?,
+                title: row.get_typed(1)?,
+                prompt_tokens: row.get_typed(2)?,
+                completion_tokens: row.get_typed(3)?,
+                cost: row.get_typed(4)?,
+                role: row.get_typed(5)?,
+                parts_json: row.get_typed(6)?,
+                created_at: row.get_typed(7)?,
+                model: row.get_typed(8)?,
+                provider: row.get_typed(9)?,
             })
         })?;
 
-        Ok(group_rows_into_conversations(rows, db_path))
+        Ok(group_rows_into_conversations(&rows, db_path))
     }
 
     /// Build the SQL query, optionally filtered by `since_ts`.
@@ -104,7 +104,7 @@ impl CrushConnector {
     /// When `since_ts` is set, uses a subquery to find sessions with ANY message
     /// at or after the cutoff, then returns ALL messages for those sessions.
     /// This ensures complete conversations are always returned.
-    fn build_query(since_ts: Option<i64>) -> (String, Vec<Box<dyn rusqlite::types::ToSql>>) {
+    fn build_query(since_ts: Option<i64>) -> (String, Vec<ParamValue>) {
         const BASE: &str = "SELECT s.id, s.title, s.prompt_tokens, s.completion_tokens, s.cost, \
                             m.role, m.parts, m.created_at, m.model, m.provider \
                             FROM sessions s JOIN messages m ON m.session_id = s.id";
@@ -118,7 +118,7 @@ impl CrushConnector {
                          (SELECT DISTINCT session_id FROM messages WHERE created_at >= ?1) \
                          ORDER BY s.id, m.created_at"
                     ),
-                    vec![Box::new(since) as Box<dyn rusqlite::types::ToSql>],
+                    vec![ParamValue::from(since)],
                 )
             },
         )
@@ -212,41 +212,28 @@ struct CrushPart {
     text: Option<String>,
 }
 
-/// Group joined session+message rows into `NormalizedConversation` structs.
-fn group_rows_into_conversations(
-    rows: rusqlite::MappedRows<'_, impl FnMut(&rusqlite::Row<'_>) -> rusqlite::Result<CrushRow>>,
-    db_path: &Path,
-) -> Vec<NormalizedConversation> {
+/// Group rows into `NormalizedConversation` structs (rows are pre-sorted by `session_id`).
+fn group_rows_into_conversations(rows: &[CrushRow], db_path: &Path) -> Vec<NormalizedConversation> {
     let mut convs: Vec<NormalizedConversation> = Vec::new();
-    let mut current_session_id: Option<String> = None;
+    let mut current_session_id: Option<&str> = None;
     let mut current_messages: Vec<NormalizedMessage> = Vec::new();
     let mut current_meta: Option<SessionMeta> = None;
 
     for row in rows {
-        let row = match row {
-            Ok(r) => r,
-            Err(e) => {
-                tracing::debug!("crush sqlite: failed to read row: {e}");
-                continue;
-            }
-        };
-
         let content = extract_text_from_parts(row.parts_json.as_deref());
         if content.trim().is_empty() {
             continue;
         }
 
         // Flush previous session when session_id changes.
-        let flush = current_session_id
-            .as_ref()
-            .is_some_and(|id| *id != row.session_id);
+        let flush = current_session_id.is_some_and(|id| id != row.session_id);
         if flush {
             if let Some(meta) = current_meta.take() {
                 flush_session(&mut convs, &mut current_messages, &meta, db_path);
             }
         }
 
-        let role = row.role.unwrap_or_else(|| "assistant".to_string());
+        let role = row.role.clone().unwrap_or_else(|| "assistant".to_string());
         let author = if role == "assistant" {
             row.model.clone()
         } else {
@@ -266,16 +253,16 @@ fn group_rows_into_conversations(
             snippets: Vec::new(),
         });
 
-        if current_session_id.as_ref() != Some(&row.session_id) {
+        if current_session_id != Some(&row.session_id) {
             current_meta = Some(SessionMeta {
                 id: row.session_id.clone(),
-                title: row.title,
+                title: row.title.clone(),
                 prompt_tokens: row.prompt_tokens,
                 completion_tokens: row.completion_tokens,
                 cost: row.cost,
             });
         }
-        current_session_id = Some(row.session_id);
+        current_session_id = Some(&row.session_id);
     }
 
     // Flush final session.
