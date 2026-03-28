@@ -168,27 +168,36 @@ impl GeminiConnector {
         )
     }
 
+    fn is_session_file(path: &Path) -> bool {
+        let name = path.file_name().and_then(|s| s.to_str()).unwrap_or("");
+        name.starts_with("session-")
+            && name.ends_with(".json")
+            && path
+                .parent()
+                .and_then(|p| p.file_name())
+                .and_then(|n| n.to_str())
+                == Some("chats")
+    }
+
     /// Find all session JSON files in the Gemini structure.
     /// Structure: ~/.gemini/tmp/<hash>/chats/session-*.json
     fn session_files(root: &Path) -> Vec<PathBuf> {
+        if root.is_file() {
+            return if Self::is_session_file(root) {
+                vec![root.to_path_buf()]
+            } else {
+                Vec::new()
+            };
+        }
+
         let mut files = Vec::new();
         for entry in WalkDir::new(root).into_iter().flatten() {
             if !entry.file_type().is_file() {
                 continue;
             }
             let path = entry.path();
-            // Only process session-*.json files in chats/ directories
-            let name = path.file_name().and_then(|s| s.to_str()).unwrap_or("");
-            if name.starts_with("session-") && name.ends_with(".json") {
-                // Verify it's in a chats/ directory
-                if path
-                    .parent()
-                    .and_then(|p| p.file_name())
-                    .and_then(|n| n.to_str())
-                    == Some("chats")
-                {
-                    files.push(path.to_path_buf());
-                }
+            if Self::is_session_file(path) {
+                files.push(path.to_path_buf());
             }
         }
         // Keep connector traversal deterministic across filesystems/runs.
@@ -234,7 +243,11 @@ fn scan_gemini_with_callback(
     // Use data_root only if it looks like a Gemini directory (for testing)
     // Otherwise use the default root
     let looks_like_root = |path: &PathBuf| {
-        path.join("chats").exists()
+        GeminiConnector::is_session_file(path)
+            || path.join("chats").exists()
+            || fs::read_dir(path)
+                .map(|mut d| d.any(|e| e.ok().is_some_and(|e| GeminiConnector::is_session_file(&e.path()))))
+                .unwrap_or(false)
             || fs::read_dir(path)
                 .map(|mut d| d.any(|e| e.ok().is_some_and(|e| e.path().join("chats").exists())))
                 .unwrap_or(false)
@@ -870,6 +883,34 @@ mod tests {
             streamed[0].messages[1].content,
             scanned[0].messages[1].content
         );
+    }
+
+    #[test]
+    fn scan_accepts_explicit_session_file_root() {
+        let tmp = TempDir::new().unwrap();
+        let chats_dir = tmp.path().join("hash").join("chats");
+        fs::create_dir_all(&chats_dir).unwrap();
+        let session_path = chats_dir.join("session-1.json");
+        let session_json = r#"{
+            "sessionId": "session-1",
+            "messages": [
+                {"type": "user", "content": "Hello Gemini!", "timestamp": "2026-01-15T08:41:26.974Z"},
+                {"type": "model", "content": "Hello! How can I help?", "timestamp": "2026-01-15T08:41:30.000Z"}
+            ]
+        }"#;
+        fs::write(&session_path, session_json).unwrap();
+
+        let connector = GeminiConnector::new();
+        let ctx = ScanContext::with_roots(
+            session_path.clone(),
+            vec![crate::connectors::scan::ScanRoot::local(session_path.clone())],
+            None,
+        );
+
+        let convs = connector.scan(&ctx).unwrap();
+        assert_eq!(convs.len(), 1);
+        assert_eq!(convs[0].source_path, session_path);
+        assert_eq!(convs[0].messages.len(), 2);
     }
 
     #[test]

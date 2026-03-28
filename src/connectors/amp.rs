@@ -73,8 +73,10 @@ impl Connector for AmpConnector {
         let mut seen_ids = std::collections::HashSet::new();
 
         let looks_like_root = |path: &PathBuf| {
-            path.file_name()
-                .is_some_and(|n| n.to_str().unwrap_or("").contains("amp"))
+            (path.is_file() && is_amp_log_file(path))
+                || path
+                    .file_name()
+                    .is_some_and(|n| n.to_str().unwrap_or("").contains("amp"))
                 || std::fs::read_dir(path)
                     .map(|mut d| d.any(|e| e.ok().is_some_and(|e| is_amp_log_file(&e.path()))))
                     .unwrap_or(false)
@@ -1342,5 +1344,30 @@ mod tests {
         assert_eq!(convs.len(), 1);
         assert_eq!(convs[0].messages[0].role, "human");
         assert_eq!(convs[0].messages[1].role, "assistantMsg");
+    }
+
+    #[test]
+    fn scan_accepts_explicit_amp_log_file_root() {
+        let dir = TempDir::new().unwrap();
+        let amp_dir = create_amp_dir(&dir);
+        let amp_file = amp_dir.join("thread-explicit.json");
+        let content = json!({
+            "messages": [
+                {"role": "user", "content": "Explicit root works"}
+            ]
+        });
+        fs::write(&amp_file, content.to_string()).unwrap();
+
+        let connector = AmpConnector::new();
+        let ctx = ScanContext::with_roots(
+            amp_file.clone(),
+            vec![crate::connectors::scan::ScanRoot::local(amp_file.clone())],
+            None,
+        );
+        let convs = connector.scan(&ctx).unwrap();
+
+        assert_eq!(convs.len(), 1);
+        assert_eq!(convs[0].source_path, amp_file);
+        assert_eq!(convs[0].messages.len(), 1);
     }
 }
