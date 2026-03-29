@@ -49,6 +49,15 @@ impl ClaudeCodeConnector {
         files
     }
 
+    fn projects_root_for_explicit_file(path: &Path) -> Option<PathBuf> {
+        path.ancestors()
+            .filter(|ancestor| ancestor.is_dir())
+            .find(|ancestor| {
+                ancestor.file_name().and_then(|name| name.to_str()) == Some("projects")
+            })
+            .map(Path::to_path_buf)
+    }
+
     fn should_compact_large_message_extra(file_size_bytes: Option<u64>) -> bool {
         file_size_bytes.is_some_and(|size| size >= LARGE_SESSION_EXTRA_COMPACT_THRESHOLD_BYTES)
     }
@@ -167,17 +176,30 @@ fn scan_claude_with_callback(
     let mut file_count = 0;
 
     for root in roots {
-        let scan_target = if root.is_file() {
-            root.parent().unwrap_or(&root).to_path_buf()
+        let explicit_file_root = root.is_file();
+        let scan_target = if explicit_file_root {
+            root.clone()
         } else {
             root.clone()
+        };
+        let external_id_root = if explicit_file_root {
+            ClaudeCodeConnector::projects_root_for_explicit_file(&root)
+                .or_else(|| root.parent().map(Path::to_path_buf))
+        } else {
+            Some(scan_target.clone())
         };
 
         if !scan_target.exists() {
             continue;
         }
 
-        for path in ClaudeCodeConnector::session_files(&scan_target) {
+        let session_paths = if explicit_file_root {
+            vec![scan_target.clone()]
+        } else {
+            ClaudeCodeConnector::session_files(&scan_target)
+        };
+
+        for path in session_paths {
             let ext = path.extension().and_then(|s| s.to_str());
             if !file_modified_since(&path, ctx.since_ts) {
                 continue;
@@ -406,9 +428,9 @@ fn scan_claude_with_callback(
 
             on_conversation(NormalizedConversation {
                 agent_slug: "claude_code".into(),
-                external_id: path
-                    .strip_prefix(&scan_target)
-                    .ok()
+                external_id: external_id_root
+                    .as_deref()
+                    .and_then(|base| path.strip_prefix(base).ok())
                     .and_then(|rel| rel.to_str())
                     .map(std::string::ToString::to_string)
                     .or_else(|| {
@@ -1286,6 +1308,48 @@ mod tests {
             "Should find session in generic named explicit root"
         );
         assert_eq!(convs[0].messages[0].content, "Generic root test");
+    }
+
+    #[test]
+    fn scan_with_explicit_file_only_reads_that_file_and_keeps_projects_relative_external_id() {
+        let dir = TempDir::new().unwrap();
+        let claude_dir = make_test_claude_dir(dir.path());
+        let project_dir = claude_dir.join("project-a");
+        fs::create_dir_all(project_dir.join("subagents")).unwrap();
+
+        let target_file = project_dir.join("target.jsonl");
+        fs::write(
+            &target_file,
+            r#"{"type":"user","message":{"role":"user","content":"Target only"}}"#,
+        )
+        .unwrap();
+
+        let sibling_file = project_dir.join("sibling.jsonl");
+        fs::write(
+            &sibling_file,
+            r#"{"type":"user","message":{"role":"user","content":"Sibling"}}"#,
+        )
+        .unwrap();
+
+        let nested_file = project_dir.join("subagents").join("nested.jsonl");
+        fs::write(
+            &nested_file,
+            r#"{"type":"user","message":{"role":"user","content":"Nested"}}"#,
+        )
+        .unwrap();
+
+        let connector = ClaudeCodeConnector::new();
+        let roots = vec![crate::connectors::ScanRoot::local(target_file.clone())];
+        let ctx = ScanContext::with_roots(target_file.clone(), roots, None);
+
+        let convs = connector.scan(&ctx).unwrap();
+
+        assert_eq!(convs.len(), 1);
+        assert_eq!(convs[0].messages[0].content, "Target only");
+        assert_eq!(
+            convs[0].external_id.as_deref(),
+            Some("project-a/target.jsonl")
+        );
     }
 
     // =========================================================================

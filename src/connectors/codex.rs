@@ -43,6 +43,23 @@ impl CodexConnector {
         }
     }
 
+    fn is_rollout_file(path: &Path) -> bool {
+        path.file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| {
+                name.starts_with("rollout-")
+                    && (name.ends_with(".jsonl") || name.ends_with(".json"))
+            })
+    }
+
+    fn sessions_dir_for_explicit_file(path: &Path) -> Option<PathBuf> {
+        path.ancestors()
+            .find(|ancestor| {
+                ancestor.file_name().and_then(|name| name.to_str()) == Some("sessions")
+            })
+            .map(Path::to_path_buf)
+    }
+
     fn rollout_files(root: &Path) -> Vec<PathBuf> {
         let mut out = Vec::new();
         let sessions = Self::sessions_dir(root);
@@ -199,15 +216,26 @@ fn scan_codex_with_callback(
         return Ok(());
     }
 
-    for mut home in roots {
-        if home.is_file() {
-            home = home.parent().unwrap_or(&home).to_path_buf();
-        }
+    for root in roots {
+        let explicit_file = root
+            .is_file()
+            .then_some(root.clone())
+            .filter(|path| CodexConnector::is_rollout_file(path));
+        let home = explicit_file
+            .as_ref()
+            .and_then(|path| path.parent().map(Path::to_path_buf))
+            .unwrap_or(root.clone());
         if !home.exists() {
             continue;
         }
 
-        let files = CodexConnector::rollout_files(&home);
+        let files = explicit_file
+            .clone()
+            .map_or_else(|| CodexConnector::rollout_files(&home), |path| vec![path]);
+        let sessions_dir = explicit_file
+            .as_ref()
+            .and_then(|path| CodexConnector::sessions_dir_for_explicit_file(path))
+            .unwrap_or_else(|| CodexConnector::sessions_dir(&home));
 
         for file in files {
             let source_path = file.clone();
@@ -224,7 +252,6 @@ fn scan_codex_with_callback(
                     "codex compacting per-message extra payloads for large session"
                 );
             }
-            let sessions_dir = CodexConnector::sessions_dir(&home);
             let external_id = source_path
                 .strip_prefix(&sessions_dir)
                 .ok()
@@ -507,6 +534,7 @@ impl Connector for CodexConnector {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::connectors::scan::ScanRoot;
     use serde_json::json;
     use std::fs;
     use tempfile::TempDir;
@@ -705,6 +733,45 @@ mod tests {
             streamed[0].messages[1].content,
             scanned[0].messages[1].content
         );
+    }
+
+    #[test]
+    fn scan_with_explicit_rollout_file_only_reads_that_file_and_keeps_relative_external_id() {
+        let dir = TempDir::new().unwrap();
+        let codex_dir = dir.path().join(".codex");
+        let sessions = codex_dir
+            .join("sessions")
+            .join("2025")
+            .join("12")
+            .join("18");
+        fs::create_dir_all(&sessions).unwrap();
+
+        let first = sessions.join("rollout-one.jsonl");
+        let second = sessions.join("rollout-two.jsonl");
+        fs::write(
+            &first,
+            r#"{"type":"response_item","timestamp":"2025-12-01T10:00:00Z","payload":{"role":"user","content":"first only"}}"#,
+        )
+        .unwrap();
+        fs::write(
+            &second,
+            r#"{"type":"response_item","timestamp":"2025-12-01T10:00:01Z","payload":{"role":"user","content":"second only"}}"#,
+        )
+        .unwrap();
+
+        let connector = CodexConnector::new();
+        let ctx =
+            ScanContext::with_roots(first.clone(), vec![ScanRoot::local(first.clone())], None);
+        let convs = connector.scan(&ctx).unwrap();
+
+        assert_eq!(convs.len(), 1);
+        assert_eq!(convs[0].messages.len(), 1);
+        assert_eq!(convs[0].messages[0].content, "first only");
+        assert_eq!(
+            convs[0].external_id.as_deref(),
+            Some("2025/12/18/rollout-one")
+        );
+        assert_eq!(convs[0].source_path, first);
     }
 
     #[test]

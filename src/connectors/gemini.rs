@@ -246,7 +246,12 @@ fn scan_gemini_with_callback(
         GeminiConnector::is_session_file(path)
             || path.join("chats").exists()
             || fs::read_dir(path)
-                .map(|mut d| d.any(|e| e.ok().is_some_and(|e| GeminiConnector::is_session_file(&e.path()))))
+                .map(|mut d| {
+                    d.any(|e| {
+                        e.ok()
+                            .is_some_and(|e| GeminiConnector::is_session_file(&e.path()))
+                    })
+                })
                 .unwrap_or(false)
             || fs::read_dir(path)
                 .map(|mut d| d.any(|e| e.ok().is_some_and(|e| e.path().join("chats").exists())))
@@ -903,7 +908,9 @@ mod tests {
         let connector = GeminiConnector::new();
         let ctx = ScanContext::with_roots(
             session_path.clone(),
-            vec![crate::connectors::scan::ScanRoot::local(session_path.clone())],
+            vec![crate::connectors::scan::ScanRoot::local(
+                session_path.clone(),
+            )],
             None,
         );
 
