@@ -393,6 +393,7 @@ impl ChatGptConnector {
                     created_at,
                     content: content_str,
                     extra: msg.clone(),
+                    invocations: Vec::new(),
                     snippets: Vec::new(),
                 });
             }
@@ -445,6 +446,7 @@ impl ChatGptConnector {
                     created_at,
                     content: content.to_string(),
                     extra: item.clone(),
+                    invocations: Vec::new(),
                     snippets: Vec::new(),
                 });
             }

@@ -516,6 +516,7 @@ impl CursorConnector {
                 created_at,
                 content: user_text.to_string(),
                 extra: serde_json::json!({}),
+                invocations: Vec::new(),
                 snippets: Vec::new(),
             });
         }
@@ -658,6 +659,7 @@ impl CursorConnector {
             created_at,
             content: content.to_string(),
             extra: bubble.clone(),
+            invocations: Vec::new(),
             snippets: Vec::new(),
         })
     }

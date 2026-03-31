@@ -227,6 +227,7 @@ impl Connector for VibeConnector {
                         created_at: created,
                         content,
                         extra: val,
+                        invocations: Vec::new(),
                         snippets: Vec::new(),
                     });
                 }

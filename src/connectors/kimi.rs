@@ -313,6 +313,7 @@ fn parse_kimi_session(path: &Path) -> Result<Option<NormalizedConversation>> {
                             created_at: created,
                             content,
                             extra: val.clone(),
+                            invocations: Vec::new(),
                             snippets: Vec::new(),
                         });
                     }
@@ -335,6 +336,7 @@ fn parse_kimi_session(path: &Path) -> Result<Option<NormalizedConversation>> {
                         created_at: created,
                         content,
                         extra: val,
+                        invocations: Vec::new(),
                         snippets: Vec::new(),
                     });
                 }
@@ -345,6 +347,27 @@ fn parse_kimi_session(path: &Path) -> Result<Option<NormalizedConversation>> {
                     .map(extract_tool_call_text)
                     .unwrap_or_else(|| "[Tool: unknown]".to_string());
 
+                let invocations = if let Some(p) = payload {
+                    let tool_name = p
+                        .get("name")
+                        .or_else(|| p.get("toolName"))
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("unknown");
+                    vec![crate::types::NormalizedInvocation {
+                        kind: "tool".to_string(),
+                        name: tool_name.to_string(),
+                        raw_name: None,
+                        call_id: None,
+                        arguments: p
+                            .get("input")
+                            .or_else(|| p.get("arguments"))
+                            .or_else(|| p.get("parameters"))
+                            .cloned(),
+                    }]
+                } else {
+                    Vec::new()
+                };
+
                 messages.push(NormalizedMessage {
                     idx: 0,
                     role: "assistant".to_string(),
@@ -352,6 +375,7 @@ fn parse_kimi_session(path: &Path) -> Result<Option<NormalizedConversation>> {
                     created_at: created,
                     content,
                     extra: val,
+                    invocations,
                     snippets: Vec::new(),
                 });
             }

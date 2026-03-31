@@ -250,6 +250,7 @@ fn group_rows_into_conversations(rows: &[CrushRow], db_path: &Path) -> Vec<Norma
                 "model": row.model,
                 "provider": row.provider,
             }),
+            invocations: Vec::new(),
             snippets: Vec::new(),
         });
 

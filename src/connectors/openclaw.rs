@@ -432,6 +432,39 @@ impl Connector for OpenClawConnector {
                                 (other, None) => other,
                             };
 
+                            let invocations = msg
+                                .get("content")
+                                .and_then(|c| c.as_array())
+                                .map(|arr| {
+                                    arr.iter()
+                                        .filter(|block| {
+                                            block.get("type").and_then(|t| t.as_str())
+                                                == Some("toolCall")
+                                        })
+                                        .map(|block| {
+                                            let name = block
+                                                .get("name")
+                                                .and_then(|n| n.as_str())
+                                                .unwrap_or("unknown")
+                                                .to_string();
+                                            crate::types::NormalizedInvocation {
+                                                kind: "tool".to_string(),
+                                                name,
+                                                raw_name: None,
+                                                call_id: block
+                                                    .get("id")
+                                                    .and_then(|v| v.as_str())
+                                                    .map(String::from),
+                                                arguments: block
+                                                    .get("arguments")
+                                                    .or_else(|| block.get("input"))
+                                                    .cloned(),
+                                            }
+                                        })
+                                        .collect::<Vec<_>>()
+                                })
+                                .unwrap_or_default();
+
                             let idx = i64::try_from(messages.len()).unwrap_or(i64::MAX);
                             messages.push(NormalizedMessage {
                                 idx,
@@ -440,6 +473,7 @@ impl Connector for OpenClawConnector {
                                 created_at: created,
                                 content,
                                 extra: val,
+                                invocations,
                                 snippets: Vec::new(),
                             });
                         }
