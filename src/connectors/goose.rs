@@ -300,7 +300,14 @@ impl GooseConnector {
 
         let mut pending: Vec<(Option<i64>, String, NormalizedMessage)> = Vec::new();
 
-        for row in rows.flatten() {
+        for row in rows {
+            let row = match row {
+                Ok(r) => r,
+                Err(e) => {
+                    tracing::debug!("goose sqlite: failed to read message row: {e}");
+                    continue;
+                }
+            };
             let msg_id = row.message_id.unwrap_or_default();
             if msg_id.is_empty() {
                 continue;
@@ -554,6 +561,9 @@ fn normalize_goose_ts_value(val: &rusqlite::types::Value) -> Option<i64> {
     match val {
         rusqlite::types::Value::Integer(i) => normalize_goose_timestamp(Some(*i)),
         rusqlite::types::Value::Real(f) => {
+            if f.is_nan() || f.is_infinite() {
+                return None;
+            }
             // Fractional epoch seconds (e.g. 1700000000.123)
             if (1_000_000_000.0..10_000_000_000.0).contains(f) {
                 Some((*f * 1000.0) as i64)
@@ -744,7 +754,19 @@ fn parse_goose_jsonl(path: &Path, session_id: &str) -> Result<NormalizedConversa
         // Parse created_at timestamp
         let created_at = match &entry.created_at {
             Some(serde_json::Value::Number(n)) => {
-                normalize_goose_timestamp(n.as_i64().or_else(|| n.as_f64().map(|f| f as i64)))
+                if let Some(i) = n.as_i64() {
+                    normalize_goose_timestamp(Some(i))
+                } else if let Some(f) = n.as_f64() {
+                    if f.is_nan() || f.is_infinite() {
+                        None
+                    } else if (1_000_000_000.0..10_000_000_000.0).contains(&f) {
+                        Some((f * 1000.0) as i64)
+                    } else {
+                        normalize_goose_timestamp(Some(f as i64))
+                    }
+                } else {
+                    None
+                }
             }
             Some(serde_json::Value::String(s)) => {
                 if let Ok(dt) = chrono::DateTime::parse_from_rfc3339(s) {
