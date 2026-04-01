@@ -55,11 +55,13 @@ chatgpt = ["connectors", "dep:aes-gcm", "dep:base64"]
 # Cursor: SQLite database access for state.vscdb
 cursor = ["connectors", "dep:rusqlite", "dep:urlencoding"]
 # OpenCode: SQLite database access for v1.2+ opencode.db
-opencode = ["connectors", "dep:rusqlite"]
+opencode = ["connectors", "dep:rusqlite", "dep:urlencoding"]
+# Goose: SQLite database access for Goose sessions.db
+goose = ["connectors", "dep:rusqlite"]
 # Crush: SQLite database access for Charm's Crush agent (uses frankensqlite)
 crush = ["connectors", "dep:frankensqlite"]
 # All connectors enabled
-all-connectors = ["connectors", "chatgpt", "cursor", "opencode", "crush"]
+all-connectors = ["connectors", "chatgpt", "cursor", "opencode", "goose", "crush"]
 
 [dev-dependencies]
 tempfile = "3"

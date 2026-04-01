@@ -194,7 +194,7 @@ impl OpenCodeConnector {
                 external_id: Some(session.id.clone()),
                 title,
                 workspace,
-                source_path: db_path.to_path_buf(),
+                source_path: db_path.join(urlencoding::encode(&session.id).as_ref()),
                 started_at,
                 ended_at,
                 metadata: serde_json::json!({
