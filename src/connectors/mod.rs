@@ -18,6 +18,8 @@ pub mod crush;
 pub mod cursor;
 pub mod factory;
 pub mod gemini;
+#[cfg(feature = "goose")]
+pub mod goose;
 pub mod kimi;
 pub mod openclaw;
 #[cfg(feature = "opencode")]
@@ -175,6 +177,8 @@ pub fn get_connector_factories() -> Vec<(&'static str, fn() -> Box<dyn Connector
     v.push(("chatgpt", || Box::new(chatgpt::ChatGptConnector::new())));
     #[cfg(feature = "cursor")]
     v.push(("cursor", || Box::new(cursor::CursorConnector::new())));
+    #[cfg(feature = "goose")]
+    v.push(("goose", || Box::new(goose::GooseConnector::new())));
     #[cfg(feature = "crush")]
     v.push(("crush", || Box::new(crush::CrushConnector::new())));
     v

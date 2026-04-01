@@ -38,6 +38,8 @@ pub use connectors::chatgpt::ChatGptConnector;
 pub use connectors::crush::CrushConnector;
 #[cfg(feature = "cursor")]
 pub use connectors::cursor::CursorConnector;
+#[cfg(feature = "goose")]
+pub use connectors::goose::GooseConnector;
 #[cfg(feature = "opencode")]
 pub use connectors::opencode::OpenCodeConnector;
 #[cfg(feature = "connectors")]
@@ -216,6 +218,13 @@ fn env_override_roots(slug: &str) -> Option<Vec<PathBuf>> {
             }
             Some(vec![PathBuf::from(root).join("sessions")])
         }
+        "goose" => {
+            let root = read("GOOSE_PATH_ROOT")?;
+            if root.is_empty() {
+                return None;
+            }
+            Some(vec![PathBuf::from(root).join("data").join("sessions")])
+        }
         _ => None,
     }
 }
@@ -317,6 +326,7 @@ fn default_probe_roots(slug: &str) -> Vec<PathBuf> {
             push(&[".copilot", "history-session-state"]);
         }
         "goose" => {
+            push(&[".local", "share", "goose", "sessions"]);
             push(&[".goose", "sessions"]);
             push(&[".goose"]);
         }
@@ -557,7 +567,10 @@ pub fn default_probe_paths_tilde() -> Vec<(&'static str, Vec<String>)> {
                     // Copilot CLI legacy session-state (v1)
                     tilde(&[".copilot", "history-session-state"]),
                 ],
-                "goose" => vec![tilde(&[".goose", "sessions"])],
+                "goose" => vec![
+                    tilde(&[".local", "share", "goose", "sessions"]),
+                    tilde(&[".goose", "sessions"]),
+                ],
                 "kimi" => vec![tilde(&[".kimi", "sessions"])],
                 "opencode" => vec![tilde(&[".local", "share", "opencode"])],
                 "openclaw" => vec![tilde(&[".openclaw", "agents"])],

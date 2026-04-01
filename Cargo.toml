@@ -57,7 +57,7 @@ cursor = ["connectors", "dep:rusqlite", "dep:urlencoding"]
 # OpenCode: SQLite database access for v1.2+ opencode.db
 opencode = ["connectors", "dep:rusqlite", "dep:urlencoding"]
 # Goose: SQLite database access for Goose sessions.db
-goose = ["connectors", "dep:rusqlite"]
+goose = ["connectors", "dep:rusqlite", "dep:urlencoding"]
 # Crush: SQLite database access for Charm's Crush agent (uses frankensqlite)
 crush = ["connectors", "dep:frankensqlite"]
 # All connectors enabled
