@@ -77,6 +77,7 @@ impl AiderConnector {
                         created_at: None,
                         content: current_content.trim().to_string(),
                         extra: json!({}),
+                        invocations: Vec::new(),
                         snippets: Vec::new(),
                     });
                     msg_idx += 1;
@@ -102,6 +103,7 @@ impl AiderConnector {
                             created_at: None,
                             content: current_content.trim().to_string(),
                             extra: json!({}),
+                            invocations: Vec::new(),
                             snippets: Vec::new(),
                         });
                         msg_idx += 1;
@@ -122,6 +124,7 @@ impl AiderConnector {
                 created_at: None,
                 content: current_content.trim().to_string(),
                 extra: json!({}),
+                invocations: Vec::new(),
                 snippets: Vec::new(),
             });
         }

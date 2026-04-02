@@ -7,8 +7,8 @@ use walkdir::WalkDir;
 
 use super::scan::ScanContext;
 use super::{
-    Connector, file_modified_since, flatten_content, franken_detection_for_connector,
-    parse_timestamp,
+    Connector, extract_invocations_from_content_blocks, file_modified_since, flatten_content,
+    franken_detection_for_connector, parse_timestamp,
 };
 use crate::types::{DetectionResult, NormalizedConversation, NormalizedMessage};
 
@@ -304,6 +304,8 @@ fn scan_claude_with_callback(
                         .and_then(|m| m.get("model"))
                         .and_then(|v| v.as_str())
                         .map(String::from);
+                    let invocations = content_val
+                        .map_or_else(Vec::new, extract_invocations_from_content_blocks);
 
                     messages.push(NormalizedMessage {
                         idx: 0,
@@ -316,6 +318,7 @@ fn scan_claude_with_callback(
                         } else {
                             val
                         },
+                        invocations,
                         snippets: Vec::new(),
                     });
                 }
@@ -368,9 +371,10 @@ fn scan_claude_with_callback(
                             (None, None) => None,
                         };
 
-                        let content_str = item
+                        let content_val = item
                             .get("content")
-                            .or_else(|| item.get("text"))
+                            .or_else(|| item.get("text"));
+                        let content_str = content_val
                             .map(flatten_content)
                             .unwrap_or_default();
 
@@ -389,6 +393,8 @@ fn scan_claude_with_callback(
                             } else {
                                 item.clone()
                             },
+                            invocations: content_val
+                                .map_or_else(Vec::new, extract_invocations_from_content_blocks),
                             snippets: Vec::new(),
                         });
                     }

@@ -304,6 +304,7 @@ impl CopilotConnector {
                             created_at: ts,
                             content,
                             extra: request.clone(),
+                            invocations: Vec::new(),
                             snippets: Vec::new(),
                         });
                     }
@@ -331,6 +332,7 @@ impl CopilotConnector {
                             created_at: ts,
                             content,
                             extra: response.clone(),
+                            invocations: Vec::new(),
                             snippets: Vec::new(),
                         });
                     }
@@ -377,6 +379,7 @@ impl CopilotConnector {
                     created_at: ts,
                     content,
                     extra: msg.clone(),
+                    invocations: Vec::new(),
                     snippets: Vec::new(),
                 });
             }
@@ -560,6 +563,7 @@ impl CopilotConnector {
                 created_at: ts,
                 content,
                 extra: event,
+                invocations: Vec::new(),
                 snippets: Vec::new(),
             });
         }
@@ -680,6 +684,7 @@ impl CopilotConnector {
                 created_at: ts,
                 content,
                 extra: event.clone(),
+                invocations: Vec::new(),
                 snippets: Vec::new(),
             });
         }

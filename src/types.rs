@@ -50,6 +50,31 @@ pub struct NormalizedMessage {
     pub content: String,
     pub extra: serde_json::Value,
     pub snippets: Vec<NormalizedSnippet>,
+    /// Structured tool/skill invocations extracted from this message.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub invocations: Vec<NormalizedInvocation>,
+}
+
+/// A single tool or skill invocation within a message.
+#[cfg(feature = "connectors")]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct NormalizedInvocation {
+    /// Classification: `"tool"` or `"skill"`.
+    pub kind: String,
+    /// Canonical searchable name (e.g. `"github-prs"`, `"Read"`, `"bash"`).
+    /// For wrapper tools like Amp's `skill("github-prs")`, this is the
+    /// unwrapped semantic name, not `"skill"`.
+    pub name: String,
+    /// Original tool name when different from `name` (e.g. `"skill"` for
+    /// Amp skill wrapper calls).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub raw_name: Option<String>,
+    /// Provider-assigned call ID, useful for joining with tool results.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub call_id: Option<String>,
+    /// Raw input/arguments passed to the tool.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub arguments: Option<serde_json::Value>,
 }
 
 #[cfg(feature = "connectors")]
@@ -211,6 +236,12 @@ impl Default for Origin {
 
 /// A single path mapping rule for rewriting paths.
 #[cfg(feature = "connectors")]
+#[cfg(feature = "connectors")]
+pub(crate) fn agent_name_matches_filter(allowed: &str, actual: &str) -> bool {
+    let normalize = |value: &str| value.trim().to_ascii_lowercase().replace('-', "_");
+    normalize(allowed) == normalize(actual)
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct PathMapping {
     /// Source path prefix to match.
@@ -291,7 +322,9 @@ impl PathMapping {
     pub fn applies_to_agent(&self, agent: Option<&str>) -> bool {
         match (&self.agents, agent) {
             (None, _) | (Some(_), None) => true,
-            (Some(agents), Some(a)) => agents.iter().any(|allowed| allowed == a),
+            (Some(agents), Some(a)) => agents
+                .iter()
+                .any(|allowed| agent_name_matches_filter(allowed, a)),
         }
     }
 }

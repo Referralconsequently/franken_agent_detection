@@ -194,7 +194,7 @@ impl OpenCodeConnector {
                 external_id: Some(session.id.clone()),
                 title,
                 workspace,
-                source_path: db_path.to_path_buf(),
+                source_path: db_path.join(urlencoding::encode(&session.id).as_ref()),
                 started_at,
                 ended_at,
                 metadata: serde_json::json!({
@@ -282,6 +282,7 @@ impl OpenCodeConnector {
                         "message_id": msg_id,
                         "session_id": session_id,
                     }),
+                    invocations: Vec::new(),
                     snippets: Vec::new(),
                 },
             ));
@@ -836,6 +837,7 @@ fn load_messages(session_msg_dir: &Path, part_dir: &Path) -> Result<Vec<Normaliz
                     "message_id": message_id,
                     "session_id": msg_info.session_id,
                 }),
+                invocations: Vec::new(),
                 snippets: Vec::new(),
             },
         ));
