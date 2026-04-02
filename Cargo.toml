@@ -36,7 +36,7 @@ base64 = { version = "0.22", optional = true }
 rusqlite = { version = "0.38", optional = true, features = ["bundled", "modern_sqlite"] }
 
 # --- Optional: frankensqlite for new connectors (Crush, etc.) ---
-frankensqlite = { path = "../frankensqlite/crates/fsqlite", package = "fsqlite", optional = true }
+frankensqlite = { git = "https://github.com/Dicklesworthstone/frankensqlite", rev = "e3f57c9a", package = "fsqlite", optional = true }
 
 [features]
 default = []
