@@ -236,6 +236,12 @@ impl Default for Origin {
 
 /// A single path mapping rule for rewriting paths.
 #[cfg(feature = "connectors")]
+#[cfg(feature = "connectors")]
+pub(crate) fn agent_name_matches_filter(allowed: &str, actual: &str) -> bool {
+    let normalize = |value: &str| value.trim().to_ascii_lowercase().replace('-', "_");
+    normalize(allowed) == normalize(actual)
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct PathMapping {
     /// Source path prefix to match.
@@ -316,7 +322,9 @@ impl PathMapping {
     pub fn applies_to_agent(&self, agent: Option<&str>) -> bool {
         match (&self.agents, agent) {
             (None, _) | (Some(_), None) => true,
-            (Some(agents), Some(a)) => agents.iter().any(|allowed| allowed == a),
+            (Some(agents), Some(a)) => agents
+                .iter()
+                .any(|allowed| agent_name_matches_filter(allowed, a)),
         }
     }
 }

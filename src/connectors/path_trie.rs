@@ -1,6 +1,6 @@
 //! Prefix trie for workspace path rewriting.
 
-use crate::types::PathMapping;
+use crate::types::{PathMapping, agent_name_matches_filter};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -17,7 +17,9 @@ impl TrieMapping {
     fn applies_to_agent(&self, agent: Option<&str>) -> bool {
         match (&self.agents, agent) {
             (None, _) | (Some(_), None) => true,
-            (Some(agents), Some(a)) => agents.iter().any(|allowed| allowed == a),
+            (Some(agents), Some(a)) => agents
+                .iter()
+                .any(|allowed| agent_name_matches_filter(allowed, a)),
         }
     }
 }
@@ -231,6 +233,30 @@ mod tests {
         assert_eq!(
             trie.lookup("/remote/home/project", None),
             "/local/copilot/project"
+        );
+    }
+
+    #[test]
+    fn path_trie_agent_filter_matches_hyphenated_and_underscored_aliases() {
+        let mut trie = PathTrie::new();
+        trie.insert(
+            "/remote/home",
+            "/local/hyphen",
+            Some(vec!["claude-code".to_string()]),
+        );
+        trie.insert(
+            "/remote/other",
+            "/local/underscore",
+            Some(vec!["claude_code".to_string()]),
+        );
+
+        assert_eq!(
+            trie.lookup("/remote/home/project", Some("claude_code")),
+            "/local/hyphen/project"
+        );
+        assert_eq!(
+            trie.lookup("/remote/other/project", Some("claude-code")),
+            "/local/underscore/project"
         );
     }
 
